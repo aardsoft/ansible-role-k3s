@@ -1,0 +1,43 @@
+- name: check k3s service state
+  ansible.builtin.systemd_service:
+    name: k3s
+  register: _k3s_status
+
+- fail:
+    msg: "passdb entry 'node_token_passdb' missing in k3s configuration"
+  when: _k3s_cfg.node_token_passdb is undefined
+
+- set_fact:
+    _k3s_token_passdb: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, missing='empty')}}"
+
+- set_fact:
+    _k3s_installer: "{{local_bin|default('/usr/local/bin')}}/k3s_installer.sh"
+
+- name: pull node token
+  slurp:
+    src: "/var/lib/rancher/k3s/server/node-token"
+  register: _k3s_token
+  changed_when: false
+  ignore_errors: true
+  no_log: true
+
+- name: copy k3s installer
+  ansible.builtin.copy:
+    src: k3s_installer.sh
+    dest: "{{_k3s_installer}}"
+    mode: 755
+    owner: root
+
+- name: setup master
+  include_tasks: setup_master.yml
+  when: >
+    _k3s_token_passdb == "" and
+    _k3s_token.failed == true
+
+- name: setup additional node
+  include_tasks: setup_additional.yml
+  when: >
+    (_first_server is defined or
+     _k3s_cfg.first_server is defined) and
+    _k3s_token_passdb != "" and
+    _k3s_token.failed == true
