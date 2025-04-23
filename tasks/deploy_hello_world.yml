@@ -1,0 +1,105 @@
+- set_fact:
+    k3s_test_namespace: default
+  when: k3s_test_namespace is undefined
+
+- name: create test namespace (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    kind: Namespace
+    state: present
+    name: "{{k3s_test_namespace}}"
+  when: k3s_test_namespace != "default"
+
+- name: create 'hello world' configmap (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: configmap
+      metadata:
+        name: hello-world
+        namespace: "{{k3s_test_namespace}}"
+      data:
+        check: "{{k3s_rand|default('NA')}}"
+        index.html: |
+          <html>
+          <head>
+          <title>Hello World!</title>
+          </head>
+          <body>Hello World!</body>
+          </html>
+
+- name: create 'hello world' ingress (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        namespace: "{{k3s_test_namespace}}"
+        name: hello-world
+        annotations:
+          kubernetes.io/ingress.class: "traefik"
+      spec:
+        rules:
+        - http:
+            paths:
+            - path: /
+              pathType: Prefix
+              backend:
+                service:
+                  name: hello-world
+                  port:
+                    number: 80
+
+- name: create "hello world" service (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        namespace: "{{k3s_test_namespace}}"
+        name: hello-world
+      spec:
+        ports:
+          - port: 80
+            protocol: TCP
+        selector:
+          app:  hello-world
+
+- name: create "hello world" deployment (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: present
+    definition:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        namespace: "{{k3s_test_namespace}}"
+        name: hello-world-nginx
+      spec:
+        selector:
+          matchLabels:
+            app: hello-world
+        replicas: 1
+        template:
+          metadata:
+            labels:
+              app: hello-world
+          spec:
+            containers:
+            - name: nginx
+              image: nginx
+              ports:
+              - containerPort: 80
+              volumeMounts:
+              - name: hello-world-volume
+                mountPath: /usr/share/nginx/html
+            volumes:
+            - name: hello-world-volume
+              configMap:
+                name: hello-world

@@ -1,0 +1,42 @@
+- set_fact:
+    k3s_test_namespace: default
+  when: k3s_test_namespace is undefined
+
+- name: remove "hello world" configmap (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: absent
+    kind: configmap
+    name: hello-world
+    namespace: "{{k3s_test_namespace}}"
+
+- name: remove "hello world" deployment (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: absent
+    kind: Deployment
+    name: hello-world-nginx
+    namespace: "{{k3s_test_namespace}}"
+
+- name: remove "hello world" ingress (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    state: absent
+    kind: Ingress
+    name: hello-world
+    namespace: "{{k3s_test_namespace}}"
+
+- name: remove "hello world" service (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s_service:
+    kubeconfig: "{{kubeconfig}}"
+    namespace: "{{k3s_test_namespace}}"
+    state: absent
+    name: hello-world
+
+- name: remove test namespace (ns "{{k3s_test_namespace}}")
+  kubernetes.core.k8s:
+    kubeconfig: "{{kubeconfig}}"
+    kind: Namespace
+    state: absent
+    name: "{{k3s_test_namespace}}"
+  when: k3s_test_namespace != "default"

@@ -1,0 +1,31 @@
+- set_fact:
+    kubeconfig: /etc/rancher/k3s/k3s.yaml
+- name: Get Cluster information
+  kubernetes.core.k8s_cluster_info:
+    kubeconfig: "{{kubeconfig}}"
+  register: api_status
+
+- debug:
+    msg: "{{api_status}}"
+
+# first deploy a nginx container in default namespace, and check if it responds
+- set_fact:
+    k3s_rand: "{{lookup('community.general.random_string', special=false)}}"
+- debug:
+    msg: "{{k3s_rand|default('NA')}}"
+- include_tasks: deploy_hello_world.yml
+- include_tasks: test_hello_world.yml
+- include_tasks: remove_hello_world.yml
+
+# next create a test namespace, deploy nginx, and check if it responds
+- set_fact:
+    k3s_rand: "{{lookup('community.general.random_string', special=false)}}"
+- debug:
+    msg: "{{k3s_rand|default('NA')}}"
+- include_tasks: deploy_hello_world.yml
+  vars:
+    k3s_test_namespace: test
+- include_tasks: test_hello_world.yml
+- include_tasks: remove_hello_world.yml
+  vars:
+    k3s_test_namespace: test

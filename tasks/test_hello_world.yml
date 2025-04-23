@@ -1,0 +1,12 @@
+- name: check http reachability
+  ansible.builtin.uri:
+    url: "http://{{ansible_host}}/check"
+    method: GET
+    return_content: true
+  register: k3s_uri_test
+  retries: 3
+  delay: 3
+
+- fail:
+    msg: "http://{{ansible_host}}/check returned {{k3s_uri_test.content}}, but expected {{k3s_rand|default('NA')}}"
+  when: k3s_rand|default('NA') != k3s_uri_test.content

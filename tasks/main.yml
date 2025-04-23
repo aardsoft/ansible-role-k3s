@@ -21,3 +21,22 @@
 
 - include_tasks: k3s_setup.yml
   when: _k3s_cfg is defined
+
+- set_fact:
+    role_packages:
+      - "python{{python_version}}-kubernetes"
+  when: >
+    (ansible_os_family == "Suse" or
+    ansible_os_family == "openSUSE MicroOS") and
+    python_version is defined
+
+- include_role:
+    name: data-utilities
+    tasks_from: install_packages
+  when: role_packages is defined
+
+- include_tasks: test_cluster.yml
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.test_cluster is defined and
+    _k3s_cfg.test_cluster == true
