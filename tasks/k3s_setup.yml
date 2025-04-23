@@ -25,7 +25,16 @@
   ansible.builtin.copy:
     src: k3s_installer.sh
     dest: "{{_k3s_installer}}"
-    mode: 755
+    mode: 0755
+    owner: root
+
+# https://raw.githubusercontent.com/longhorn/longhorn/refs/tags/v1.8.1/scripts/environment_check.sh
+# Update with newer release as needed
+- name: copy longhorn environment check
+  ansible.builtin.copy:
+    src: longhorn_environment_check.sh
+    dest: "{{local_bin|default('/usr/local/bin')}}/longhorn_environment_check"
+    mode: 0755
     owner: root
 
 - name: setup master

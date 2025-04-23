@@ -25,6 +25,8 @@
 - set_fact:
     role_packages:
       - "python{{python_version}}-kubernetes"
+      - nfs-client
+      - open-iscsi
   when: >
     (ansible_os_family == "Suse" or
     ansible_os_family == "openSUSE MicroOS") and
