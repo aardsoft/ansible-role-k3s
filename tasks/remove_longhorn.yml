@@ -1,0 +1,2 @@
+# this is essentially https://longhorn.io/docs/1.8.1/deploy/uninstall/#uninstalling-longhorn-using-kubectl
+# with files pulled by the pull-longhorn-files script

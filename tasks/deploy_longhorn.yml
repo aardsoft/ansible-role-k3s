@@ -1,0 +1,8 @@
+- name: deploy longhorn
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('file', 'longhorn.yaml')}}"
+    validate:
+      fail_on_error: yes
+      strict: yes

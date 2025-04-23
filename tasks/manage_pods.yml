@@ -1,0 +1,9 @@
+- name: manage pods
+  include_tasks: manage_pods.yml
+  with_dict: "{{network_nodes}}"
+  loop_control:
+    loop_var: _node
+  when: >
+    _node.value.type is defined and _node.value.type == "k3s" and
+    _node.value.machine is defined and _node.value.machine == inventory_hostname and
+    (_node.value.lxc.state is undefined or _node.value.lxc.state != "absent")

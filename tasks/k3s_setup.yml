@@ -30,7 +30,7 @@
 
 - name: copy longhorn environment check
   ansible.builtin.copy:
-    src: longhorn_environment_check.sh
+    src: longhorn/environment_check.sh
     dest: "{{local_bin|default('/usr/local/bin')}}/longhorn_environment_check"
     mode: 0755
     owner: root
