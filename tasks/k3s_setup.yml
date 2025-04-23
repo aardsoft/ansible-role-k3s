@@ -28,8 +28,6 @@
     mode: 0755
     owner: root
 
-# https://raw.githubusercontent.com/longhorn/longhorn/refs/tags/v1.8.1/scripts/environment_check.sh
-# Update with newer release as needed
 - name: copy longhorn environment check
   ansible.builtin.copy:
     src: longhorn_environment_check.sh

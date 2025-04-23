@@ -1,0 +1,10 @@
+#!/bin/bash
+# see wget https://raw.githubusercontent.com/longhorn/longhorn/v1.8.1/deploy/longhorn-images.txt
+
+LONGHORN_RELEASE=v1.8.1
+
+wget -O files/longhorn-save-images.sh https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_RELEASE}/scripts/save-images.sh
+wget -O files/longhorn-load-images.sh https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_RELEASE}/scripts/load-images.sh
+wget -O files/longhorn_environment_check.sh https://raw.githubusercontent.com/longhorn/longhorn/refs/tags/${LONGHORN_RELEASE}/scripts/environment_check.sh
+wget -O files/longhorn.yaml https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_RELEASE}/deploy/longhorn.yaml
+wget -O files/longhorn-images.txt wget https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_RELEASE}/deploy/longhorn-images.txt
