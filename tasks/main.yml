@@ -58,10 +58,12 @@
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.longhorn is defined and
-    _k3s_cfg.longhorn == true
+    _k3s_cfg.longhorn.state is defined and
+    _k3s_cfg.longhorn.state == 'present'
 
 - include_tasks: remove_longhorn.yml
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.longhorn is defined and
-    _k3s_cfg.longhorn == false
+    _k3s_cfg.longhorn.state is defined and
+    _k3s_cfg.longhorn.state == 'absent'
