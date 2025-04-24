@@ -4,7 +4,7 @@
     K3S_URL: "https://{{_k3s_cfg.first_server|default(_first_server)}}:6443"
     K3S_TOKEN: "{{_k3s_token_passdb}}"
     K3S_KUBECONFIG_MODE: "644"
-    INSTALL_K3S_EXEC: "server"
+    INSTALL_K3S_EXEC: "{{k3s_role}}"
   register: _additional_install_status
 
 - name: Reboot transactional system

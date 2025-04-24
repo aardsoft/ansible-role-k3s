@@ -52,18 +52,21 @@
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.test_cluster is defined and
-    _k3s_cfg.test_cluster == true
+    _k3s_cfg.test_cluster == true and
+    k3s_role|default('agent') == 'server'
 
 - include_tasks: deploy_longhorn.yml
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.longhorn is defined and
     _k3s_cfg.longhorn.state is defined and
-    _k3s_cfg.longhorn.state == 'present'
+    _k3s_cfg.longhorn.state == 'present' and
+    k3s_role|default('agent') == 'server'
 
 - include_tasks: remove_longhorn.yml
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.longhorn is defined and
     _k3s_cfg.longhorn.state is defined and
-    _k3s_cfg.longhorn.state == 'absent'
+    _k3s_cfg.longhorn.state == 'absent' and
+    k3s_role|default('agent') == 'server'

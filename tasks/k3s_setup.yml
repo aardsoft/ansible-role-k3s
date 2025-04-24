@@ -39,11 +39,13 @@
   include_tasks: setup_master.yml
   when: >
     _k3s_token_passdb == "" and
-    _k3s_token.failed == true
+    _k3s_token.failed == true and
+    k3s_role|default('agent') == 'server'
 
 - name: setup additional node
   include_tasks: setup_additional.yml
   when: >
+    k3s_role is defined and
     (_first_server is defined or
      _k3s_cfg.first_server is defined) and
     _k3s_token_passdb != "" and
