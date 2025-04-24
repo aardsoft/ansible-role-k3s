@@ -6,6 +6,7 @@
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition: "{{lookup('file', 'files/longhorn/uninstall.yaml')}}"
+  ignore_errors: true
 
 # kubectl get job/longhorn-uninstall -n longhorn-system -w
 # before continuing we need to wait for success of above job, figure out how to do that in ansible
@@ -20,9 +21,11 @@
       type: Complete
       status: "True"
   register: api_status
+  ignore_errors: true
 
 - debug:
     msg: "{{api_status}}"
+  ignore_errors: true
 
 # the above doesn't work for job resources, so until that gets figured out just
 # wait a bit before continuing
@@ -31,6 +34,7 @@
 
 - ansible.builtin.wait_for:
     timeout: 120
+  become: false
   delegate_to: localhost
 
 - name: remove remaining references
@@ -43,3 +47,4 @@
   with_items:
     - uninstall
     - longhorn
+  ignore_errors: true
