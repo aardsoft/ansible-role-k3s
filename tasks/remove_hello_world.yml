@@ -4,7 +4,7 @@
 
 - name: remove "hello world" configmap (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
     kind: configmap
     name: hello-world
@@ -12,7 +12,7 @@
 
 - name: remove "hello world" deployment (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
     kind: Deployment
     name: hello-world-nginx
@@ -20,7 +20,7 @@
 
 - name: remove "hello world" ingress (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
     kind: Ingress
     name: hello-world
@@ -28,14 +28,14 @@
 
 - name: remove "hello world" service (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s_service:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     namespace: "{{k3s_test_namespace}}"
     state: absent
     name: hello-world
 
 - name: remove test namespace (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     kind: Namespace
     state: absent
     name: "{{k3s_test_namespace}}"

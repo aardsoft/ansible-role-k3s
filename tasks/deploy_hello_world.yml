@@ -4,7 +4,7 @@
 
 - name: create test namespace (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     kind: Namespace
     state: present
     name: "{{k3s_test_namespace}}"
@@ -12,7 +12,7 @@
 
 - name: create 'hello world' configmap (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition:
       apiVersion: v1
@@ -32,7 +32,7 @@
 
 - name: create 'hello world' ingress (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition:
       apiVersion: networking.k8s.io/v1
@@ -56,7 +56,7 @@
 
 - name: create "hello world" service (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition:
       apiVersion: v1
@@ -73,7 +73,7 @@
 
 - name: create "hello world" deployment (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition:
       apiVersion: apps/v1

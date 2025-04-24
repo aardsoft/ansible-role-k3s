@@ -1,8 +1,6 @@
-- set_fact:
-    kubeconfig: /etc/rancher/k3s/k3s.yaml
-- name: Get Cluster information
+- name: get Cluster information
   kubernetes.core.k8s_cluster_info:
-    kubeconfig: "{{kubeconfig}}"
+    kubeconfig: "{{_k3s_kubecfg}}"
   register: api_status
 
 - debug:
