@@ -3,3 +3,17 @@
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition: "{{lookup('file', 'longhorn/longhorn.yaml')}}"
+
+- name: create longhorn-ui ingress
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata: "{{_k3s_cfg.longhorn.ui_ingress.metadata}}"
+      spec: "{{_k3s_cfg.longhorn.ui_ingress.spec}}"
+  when: >
+    _k3s_cfg.longhorn.ui_ingress is defined and
+    _k3s_cfg.longhorn.ui_ingress.metadata is defined and
+    _k3s_cfg.longhorn.ui_ingress.spec is defined
