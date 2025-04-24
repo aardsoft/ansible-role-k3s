@@ -1,2 +1,45 @@
 # this is essentially https://longhorn.io/docs/1.8.1/deploy/uninstall/#uninstalling-longhorn-using-kubectl
 # with files pulled by the pull-longhorn-files script
+
+- name: remove longhorn
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('file', 'files/longhorn/uninstall.yaml')}}"
+
+# kubectl get job/longhorn-uninstall -n longhorn-system -w
+# before continuing we need to wait for success of above job, figure out how to do that in ansible
+- name: wait for uninstall to complete
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    namespace: longhorn-system
+    name: longhorn-uninstall
+    kind: job
+    wait: yes
+    wait_condition:
+      type: Complete
+      status: "True"
+  register: api_status
+
+- debug:
+    msg: "{{api_status}}"
+
+# the above doesn't work for job resources, so until that gets figured out just
+# wait a bit before continuing
+#
+# Failed to find API for resource with apiVersion "v1" and kind "job"
+
+- ansible.builtin.wait_for:
+    timeout: 120
+  delegate_to: localhost
+
+- name: remove remaining references
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition: "{{lookup('file', 'files/longhorn/'+def+'.yaml')}}"
+  loop_control:
+    loop_var: def
+  with_items:
+    - uninstall
+    - longhorn
