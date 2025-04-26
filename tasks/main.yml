@@ -38,6 +38,11 @@
       - "python{{python_version}}-kubernetes"
       - nfs-client
       - open-iscsi
+      - bash-completion
+      - helm
+      - helm-bash-completion
+      - helmfile
+      - helmfile-bash-completion
   when: >
     (ansible_os_family == "Suse" or
     ansible_os_family == "openSUSE MicroOS") and
