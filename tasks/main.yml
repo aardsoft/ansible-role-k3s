@@ -75,3 +75,9 @@
     _k3s_cfg.longhorn.state is defined and
     _k3s_cfg.longhorn.state == 'absent' and
     k3s_role|default('agent') == 'server'
+
+- name: run extra deployments
+  include_tasks: "deployments.yml"
+  with_dict: "{{_k3s_cfg.deployments|default({})}}"
+  loop_control:
+    loop_var: _deployment

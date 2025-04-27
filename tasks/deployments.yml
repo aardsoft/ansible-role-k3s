@@ -1,0 +1,23 @@
+- set_fact:
+    _deployment_state: "{{_deployment.value.state|default('present')}}"
+    _deployment_role: "{{_deployment.value.role|default('k3s-deployments')}}"
+    _deployment_name: "{{_deployment.value.name|default(_deployment.key)}}"
+
+# TODO: also support loading from a variable, template or file
+- set_fact:
+    _deployment_values: "{{_deployment.value.config}}"
+  when: _deployment.value.config is defined
+
+- include_role:
+    tasks_from: "deploy-{{_deployment_name}}"
+    name: "{{_deployment_role}}"
+  when: _deployment_state == 'present'
+  vars:
+    cfg_values: "{{_deployment_values|default({})}}"
+
+- include_role:
+    tasks_from: "destroy-{{_deployment_name}}"
+    name: "{{_deployment_role}}"
+  when: _deployment_state == 'absent'
+  vars:
+    cfg_values: "{{_deployment_values|default({})}}"
