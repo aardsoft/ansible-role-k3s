@@ -81,3 +81,17 @@
   with_dict: "{{_k3s_cfg.deployments|default({})}}"
   loop_control:
     loop_var: _deployment
+
+- name: include additional tasks (cluster config)
+  include_tasks: "tasks/{{_tasks}}.yml"
+  with_items: "{{_k3s_cfg.extra_tasks}}"
+  loop_control:
+    loop_var: _tasks
+  when: _k3s_cfg.extra_tasks is defined
+
+- name: include additional tasks (global)
+  include_tasks: "tasks/{{_tasks}}.yml"
+  with_items: "{{k3s_extra_tasks}}"
+  loop_control:
+    loop_var: _tasks
+  when: k3s_extra_tasks is defined
