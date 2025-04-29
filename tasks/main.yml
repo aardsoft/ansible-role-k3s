@@ -1,3 +1,6 @@
+- set_fact:
+    _first_server: false
+
 - name: set default password store
   set_fact:
     k3s_passdb: "{{passdb|default('passwordstore')}}"
@@ -29,6 +32,13 @@
   when: >-
     _k3s_cfg is defined and
     _k3s_cfg.kubecfg is defined
+
+- name: check for first server
+  set_fact:
+    _first_server: true
+  when: >
+    ansible_all_ipv4_addresses is defined and
+    _k3s_cfg.first_server in ansible_all_ipv4_addresses
 
 - include_tasks: k3s_setup.yml
   when: _k3s_cfg is defined
@@ -66,7 +76,8 @@
     _k3s_cfg.longhorn is defined and
     _k3s_cfg.longhorn.state is defined and
     _k3s_cfg.longhorn.state == 'present' and
-    k3s_role|default('agent') == 'server'
+    k3s_role|default('agent') == 'server' and
+    _first_server == true
 
 - include_tasks: remove_longhorn.yml
   when: >
@@ -74,14 +85,21 @@
     _k3s_cfg.longhorn is defined and
     _k3s_cfg.longhorn.state is defined and
     _k3s_cfg.longhorn.state == 'absent' and
-    k3s_role|default('agent') == 'server'
+    k3s_role|default('agent') == 'server' and
+    _first_server == true
 
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"
   loop_control:
     loop_var: _deployment
+  when: >
+    k3s_role|default('agent') == 'server' and
+    _first_server == true
 
+# those tasks could be anything - so they're run against all cluster members.
+# it's expected that the included tasks limit to roles or specific cluster
+# members
 - name: include additional tasks (cluster config)
   include_tasks: "tasks/{{_tasks}}.yml"
   with_items: "{{_k3s_cfg.extra_tasks}}"
