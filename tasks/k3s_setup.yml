@@ -4,8 +4,10 @@
   register: _k3s_status
 
 - set_fact:
+    _k3s_token: ""
     _k3s_token_passdb: ""
     _k3s_bind_args: ""
+    _node_uninitialized: false
 
 - set_fact:
     _k3s_token_passdb: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, missing='empty')}}"
@@ -17,10 +19,14 @@
 - name: pull node token
   slurp:
     src: "/var/lib/rancher/k3s/server/node-token"
-  register: _k3s_token
+  register: _k3s_token_slurp
   changed_when: false
   ignore_errors: true
   no_log: true
+
+- set_fact:
+    _node_uninitialized: true
+  when: _k3s_token_slurp.failed == true
 
 - name: copy k3s installer
   ansible.builtin.copy:
@@ -64,16 +70,46 @@
 - name: setup master
   include_tasks: setup_master.yml
   when: >
-    _k3s_token_passdb == "" and
-    _k3s_token.failed == true and
+    _k3s_token_slurp.failed == true and
     k3s_role|default('agent') == 'server' and
     _first_server == true
+
+- name: set k3s token
+  set_fact:
+    _k3s_token: "{{_k3s_token_slurp.content|b64decode|trim}}"
+  when: >
+    _k3s_token_slurp.failed == false and
+    k3s_role|default('agent') == 'server' and
+    _first_server == true
+
+- name: add node token to password store
+  set_fact:
+    _dummy: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, create=true, userpass=_k3s_token)}}"
+  when: >
+    _k3s_cfg.node_token_passdb is defined and
+    _k3s_token_passdb == "" and
+    _first_server == true
+
+- name: delegate k3s tokens
+  include_tasks: delegate_token.yml
+  with_items: "{{ansible_play_hosts}}"
+  loop_control:
+    loop_var: _delegate
+  when: >
+    _first_server == true
+
+- name: use passdb token
+  set_fact:
+    _k3s_token: "{{_k3s_token_passdb}}"
+  when: >
+    _k3s_token == "" and
+    _k3s_token_passdb != ""
 
 - name: setup additional node
   include_tasks: setup_additional.yml
   when: >
     _first_server == false and
+    _node_uninitialized == true and
     k3s_role is defined and
     _k3s_cfg.first_server is defined and
-    _k3s_token_passdb != "" and
-    _k3s_token.failed == true
+    _k3s_token != ""

@@ -1,8 +1,11 @@
+- debug:
+    msg: "master: server --cluster-init --write-kubeconfig-mode=644 {{_k3s_bind_args}}"
+
 # we probably should add a variable to block new deployments if the key should be there
 - name: run k3s installer (master)
   ansible.builtin.shell: "{{_k3s_installer}}"
   environment:
-    INSTALL_K3S_EXEC: "server --cluster-init --write-kubeconfig-mode=644 {{_k3s_bind_args}"
+    INSTALL_K3S_EXEC: "server --cluster-init --write-kubeconfig-mode=644 {{_k3s_bind_args}}"
   register: _master_install_status
 
 - name: Reboot transactional system
@@ -15,7 +18,7 @@
 - name: pull node token
   slurp:
     src: "/var/lib/rancher/k3s/server/node-token"
-  register: _k3s_token
+  register: _k3s_token_slurp
   changed_when: false
   ignore_errors: true
   no_log: true
@@ -31,11 +34,4 @@
         {{_master_install_status.stderr}}
   when: >
     _master_install_status is changed and
-    _k3s_token.failed == true
-
-- name: add node token to password store
-  set_fact:
-    _dummy: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, create=true, userpass=_k3s_token.content|b64decode)}}"
-  when: >
-    _master_install_status is changed and
-    _k3s_cfg.node_token_passdb is defined
+    _k3s_token_slurp.failed == true

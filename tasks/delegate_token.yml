@@ -1,0 +1,7 @@
+- name: delegate k3s tokens ({{_delegate}})
+  set_fact:
+    _k3s_token: "{{hostvars[inventory_hostname]['_k3s_token']}}"
+  when: >
+    hostvars[inventory_hostname]['_k3s_cfg']['first_server'] == _k3s_cfg.first_server
+  delegate_to: "{{_delegate}}"
+  delegate_facts: true
