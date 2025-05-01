@@ -5,6 +5,7 @@
 
 - set_fact:
     _k3s_token_passdb: ""
+    _k3s_bind_args: ""
 
 - set_fact:
     _k3s_token_passdb: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, missing='empty')}}"
@@ -34,6 +35,31 @@
     dest: "{{local_bin|default('/usr/local/bin')}}/longhorn_environment_check"
     mode: 0755
     owner: root
+
+- name: set bind address
+  set_fact:
+    _bind_address: "{{hostvars[inventory_hostname]['ansible_' + __iface].ipv4.address}}"
+  loop_control:
+    loop_var: __iface
+  with_items: "{{hostvars[inventory_hostname]['ansible_interfaces']}}"
+  when: >
+    _k3s_cfg.bind_cidr is defined and
+    _k3s_cfg.bind_cidr|ipaddr('network') == hostvars[inventory_hostname]['ansible_' + __iface].ipv4.network|default('N/A')
+
+- name: add bind address to bind args
+  set_fact:
+    _k3s_bind_args: " {{_k3s_bind_args}} -i {{_bind_address}} --bind-address={{_bind_address}}"
+  when: _bind_address is defined
+
+- name: add service cidr to bind args
+  set_fact:
+    _k3s_bind_args: " {{_k3s_bind_args}} --service-cidr={{_k3s_cfg.service_cidr}}"
+  when: _k3s_cfg.service_cidr is defined
+
+- name: add cluster cidr to bind args
+  set_fact:
+    _k3s_bind_args: " {{_k3s_bind_args}} --cluster-cidr={{_k3s_cfg.cluster_cidr}}"
+  when: _k3s_cfg.cluster_cidr is defined
 
 - name: setup master
   include_tasks: setup_master.yml

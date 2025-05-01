@@ -2,7 +2,7 @@
 - name: run k3s installer (master)
   ansible.builtin.shell: "{{_k3s_installer}}"
   environment:
-    INSTALL_K3S_EXEC: "server --cluster-init --write-kubeconfig-mode=644"
+    INSTALL_K3S_EXEC: "server --cluster-init --write-kubeconfig-mode=644 {{_k3s_bind_args}"
   register: _master_install_status
 
 - name: Reboot transactional system
