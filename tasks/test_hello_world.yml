@@ -5,7 +5,7 @@
     return_content: true
   register: k3s_uri_test
   retries: 3
-  delay: 10
+  delay: 30
 
 - fail:
     msg: "http://{{ansible_host}}/check returned {{k3s_uri_test.content}}, but expected {{k3s_rand|default('NA')}}"
