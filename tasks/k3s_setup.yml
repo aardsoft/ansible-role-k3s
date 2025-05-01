@@ -3,12 +3,12 @@
     name: k3s
   register: _k3s_status
 
-- fail:
-    msg: "passdb entry 'node_token_passdb' missing in k3s configuration"
-  when: _k3s_cfg.node_token_passdb is undefined
+- set_fact:
+    _k3s_token_passdb: ""
 
 - set_fact:
     _k3s_token_passdb: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, missing='empty')}}"
+  when: _k3s_cfg.node_token_passdb is defined
 
 - set_fact:
     _k3s_installer: "{{local_bin|default('/usr/local/bin')}}/k3s_installer.sh"

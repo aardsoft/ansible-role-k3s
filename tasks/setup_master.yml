@@ -37,4 +37,5 @@
   set_fact:
     _dummy: "{{lookup(k3s_passdb, _k3s_cfg.node_token_passdb, create=true, userpass=_k3s_token.content|b64decode)}}"
   when: >
-    _master_install_status is changed
+    _master_install_status is changed and
+    _k3s_cfg.node_token_passdb is defined
