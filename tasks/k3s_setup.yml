@@ -26,7 +26,18 @@
 
 - set_fact:
     _node_uninitialized: true
-  when: _k3s_token_slurp.failed == true
+  when: >
+    _k3s_token_slurp.failed == true and
+    k3s_role|default('agent') == 'server'
+
+- ansible.builtin.service_facts:
+  when: k3s_role|default('agent') == 'agent'
+
+- set_fact:
+    _node_uninitialized: true
+  when: >
+    k3s_role|default('agent') == 'agent' and
+    ansible_facts['services']['k3s-agent.service']['status'] | default('not-found') != 'enabled'
 
 - name: copy k3s installer
   ansible.builtin.copy:
