@@ -43,9 +43,20 @@
 - include_tasks: k3s_setup.yml
   when: _k3s_cfg is defined
 
+# for leap we don't have the multiple python versions yet, so just stick
+# with the generic 3 package
+- set_fact:
+    _python_version: 3
+
+- set_fact:
+    _python_version: "{{python_version}}"
+  when: >
+    python_version is defined and
+    ansible_distribution != "openSUSE Leap"
+
 - set_fact:
     role_packages:
-      - "python{{python_version}}-kubernetes"
+      - "python{{_python_version}}-kubernetes"
       - nfs-client
       - open-iscsi
       - bash-completion
@@ -55,8 +66,7 @@
       - helmfile-bash-completion
   when: >
     (ansible_os_family == "Suse" or
-    ansible_os_family == "openSUSE MicroOS") and
-    python_version is defined
+    ansible_os_family == "openSUSE MicroOS")
 
 - include_role:
     name: data-utilities
