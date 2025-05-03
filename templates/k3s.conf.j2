@@ -1,0 +1,6 @@
+#jinja2: lstrip_blocks: True
+# {{ ansible_managed }}
+
+[Service]
+ExecStart=
+ExecStart=/usr/local/bin/k3s {{_k3s_args}}

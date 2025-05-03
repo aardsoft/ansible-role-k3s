@@ -46,6 +46,13 @@
     mode: 0755
     owner: root
 
+- name: create k3s.service.de
+  ansible.builtin.file:
+    state: directory
+    mode: 0755
+    owner: root
+    path: /etc/systemd/system/k3s.service.d
+
 - name: copy longhorn environment check
   ansible.builtin.copy:
     src: longhorn/environment_check.sh
@@ -77,6 +84,29 @@
   set_fact:
     _k3s_bind_args: " {{_k3s_bind_args}} --cluster-cidr={{_k3s_cfg.cluster_cidr}}"
   when: _k3s_cfg.cluster_cidr is defined
+
+- set_fact:
+    _k3s_args: "{{k3s_role}} {{_k3s_bind_args}} {{_k3s_cfg.args|default('')}}"
+
+- set_fact:
+    _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode=644"
+  when: _first_server == true
+
+- name: create k3s service drop-in
+  ansible.builtin.template:
+    src: k3s.conf.j2
+    dest: /etc/systemd/system/k3s.service.d/10-exec.conf
+    mode: 0644
+    owner: root
+  register: _dropin_status
+
+- name: restart k3s
+  ansible.builtin.systemd_service:
+    name: k3s
+    daemon_reload: true
+    state: restarted
+  when: _dropin_status is changed
+  ignore_errors: true
 
 - name: setup master
   include_tasks: setup_master.yml
