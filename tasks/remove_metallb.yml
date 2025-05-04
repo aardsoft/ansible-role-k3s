@@ -1,0 +1,5 @@
+- name: destroy metallb
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition: "{{lookup('file', 'metallb/metallb-native.yaml')}}"

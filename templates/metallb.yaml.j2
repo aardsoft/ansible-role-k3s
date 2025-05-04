@@ -1,0 +1,39 @@
+{% for pool in _pools %}
+apiVersion: metallb.io/v1beta1
+kind: IPAddressPool
+metadata:
+  name: {{_pools[pool].name|default(pool)}}
+  namespace: metallb-system
+spec:
+  addresses:
+{% for address in _pools[pool].addresses %}
+    - {{address}}
+{% endfor %}
+---
+{% endfor %}
+{% for advertisement in _advertisements %}
+apiVersion: metallb.io/v1beta1
+kind: {{_advertisements[advertisement].kind|default('L2Advertisement')}}
+metadata:
+  name: {{_advertisements[advertisement].name|default(advertisement)}}
+  namespace: metallb-system
+spec:
+  ipAddressPools:
+{% for pool in _advertisements[advertisement].pools %}
+    - {{pool}}
+{% endfor %}
+---
+{% endfor %}
+{% for peer in _bgp_peers %}
+apiVersion: metallb.io/v1beta1
+kind: BGPPeer
+metadata:
+  name: {{_bg_peers[peer].name|default(peer)}}
+  namespace: metallb-system
+spec:
+  peerAddress: {{_bgp_peers[peer].peerAddress}}
+  peerASN: {{_bgp_peers[peer].peerASN|default(64512)}}
+  myASN: {{_bgp_peers[peer].myASN|default(64513)}}
+  ttl: {{_bgp_peers[peer].ttl|default(255)}}
+---
+{% endfor %}

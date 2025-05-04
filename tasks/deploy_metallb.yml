@@ -1,0 +1,30 @@
+- name: push metallb config template
+  become: false
+  connection: local
+  local_action:
+    module: ansible.builtin.template
+    mode: 0600
+    src: metallb.yaml.j2
+    dest: "{{_k3s_debug_path}}/metallb.yaml"
+  vars:
+    _pools: "{{_k3s_cfg.metallb.pools|default({})}}"
+    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})}}"
+    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})}}"
+  when: >
+    _k3s_debug_path is defined
+
+- name: deploy metallb
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('file', 'metallb/metallb-native.yaml')}}"
+
+- name: deploy metallb pools
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('template', 'metallb.yaml.j2')}}"
+  vars:
+    _pools: "{{_k3s_cfg.metallb.pools|default({})}}"
+    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})}}"
+    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})}}"

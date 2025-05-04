@@ -1,0 +1,7 @@
+#!/bin/bash
+
+METALLB_RELEASE=v0.14.9
+METALLB_URL=https://raw.githubusercontent.com/metallb/metallb/${METALLB_RELEASE}
+
+# deploy
+wget -O files/metallb/metallb-native.yaml ${METALLB_URL}/config/manifests/metallb-native.yaml

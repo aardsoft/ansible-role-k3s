@@ -80,30 +80,9 @@
     _k3s_cfg.test_cluster == true and
     k3s_role|default('agent') == 'server'
 
-- include_tasks: deploy_longhorn.yml
+- include_tasks: deploy_on_first.yml
   when: >
     _k3s_cfg is defined and
-    _k3s_cfg.longhorn is defined and
-    _k3s_cfg.longhorn.state is defined and
-    _k3s_cfg.longhorn.state == 'present' and
-    k3s_role|default('agent') == 'server' and
-    _first_server == true
-
-- include_tasks: remove_longhorn.yml
-  when: >
-    _k3s_cfg is defined and
-    _k3s_cfg.longhorn is defined and
-    _k3s_cfg.longhorn.state is defined and
-    _k3s_cfg.longhorn.state == 'absent' and
-    k3s_role|default('agent') == 'server' and
-    _first_server == true
-
-- name: run extra deployments
-  include_tasks: "deployments.yml"
-  with_dict: "{{_k3s_cfg.deployments|default({})}}"
-  loop_control:
-    loop_var: _deployment
-  when: >
     k3s_role|default('agent') == 'server' and
     _first_server == true
 
