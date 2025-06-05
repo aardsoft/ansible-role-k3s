@@ -1,6 +1,3 @@
-- debug:
-    msg: "master: server --cluster-init --write-kubeconfig-mode=644 {{_k3s_args}}"
-
 # we probably should add a variable to block new deployments if the key should be there
 - name: run k3s installer (master)
   ansible.builtin.shell: "{{_k3s_installer}}"

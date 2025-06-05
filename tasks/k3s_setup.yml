@@ -89,14 +89,14 @@
     _k3s_args: "{{k3s_role}} {{_k3s_bind_args}} {{_k3s_cfg.args|default('')}}"
 
 - set_fact:
-    _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode=644"
+    _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode={{_k3s_cfg.kubeconfig_mode|default('0600')}}"
   when: _first_server == true
 
 - name: create k3s service drop-in
   ansible.builtin.template:
     src: k3s.conf.j2
     dest: /etc/systemd/system/k3s.service.d/10-exec.conf
-    mode: 0644
+    mode: "0644"
     owner: root
   register: _dropin_status
 
