@@ -6,7 +6,7 @@
   environment:
     K3S_URL: "https://{{_k3s_cfg.first_server}}:6443"
     K3S_TOKEN: "{{_k3s_token}}"
-    K3S_KUBECONFIG_MODE: "{{_k3s_cfg.kubeconfig_mode|default('0600)'}}"
+    K3S_KUBECONFIG_MODE: "{{_k3s_cfg.kubeconfig_mode|default('0600')}}"
     INSTALL_K3S_EXEC: "{{_k3s_args}}"
   register: _additional_install_status
 
