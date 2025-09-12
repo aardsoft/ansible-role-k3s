@@ -111,7 +111,7 @@
 - name: setup master
   include_tasks: setup_master.yml
   when: >
-    _k3s_token_slurp.failed == true and
+    (_k3s_token_slurp.failed == true or k3s_upgrade|default(false)|bool == true) and
     k3s_role|default('agent') == 'server' and
     _first_server == true
 
@@ -150,7 +150,7 @@
   include_tasks: setup_additional.yml
   when: >
     _first_server == false and
-    _node_uninitialized == true and
+    (_node_uninitialized == true or k3s_upgrade|default(false)|bool == true) and
     k3s_role is defined and
     _k3s_cfg.first_server is defined and
     _k3s_token != ""
