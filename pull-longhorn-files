@@ -1,7 +1,7 @@
 #!/bin/bash
 # see wget https://raw.githubusercontent.com/longhorn/longhorn/v1.8.1/deploy/longhorn-images.txt
 
-LONGHORN_RELEASE=v1.8.1
+LONGHORN_RELEASE=v1.9.1
 LONGHORN_URL=https://raw.githubusercontent.com/longhorn/longhorn/${LONGHORN_RELEASE}
 
 # deploy
