@@ -1,9 +1,19 @@
 - name: manage pods
-  include_tasks: manage_pods.yml
-  with_dict: "{{network_nodes}}"
+  include_tasks: manage_pod.yml
+  with_dict: "{{network_pods}}"
   loop_control:
-    loop_var: _node
+    loop_var: _pod
   when: >
-    _node.value.type is defined and _node.value.type == "k3s" and
-    _node.value.machine is defined and _node.value.machine == inventory_hostname and
-    (_node.value.lxc.state is undefined or _node.value.lxc.state != "absent")
+    _pod.value.type is defined and _pod.value.type == "k3s-pod" and
+    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == inventory_hostname) and
+    (_pod.value.k3s.state is undefined or _pod.value.k3s.state != "absent")
+
+- name: destroy absent pods
+  include_tasks: destroy_pod.yml
+  with_dict: "{{network_pods}}"
+  loop_control:
+    loop_var: _pod
+  when: >
+    _pod.value.type is defined and _pod.value.type == "k3s-pod" and
+    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == inventory_hostname) and
+    _pod.value.k3s.state is defined and _pod.value.k3s.state == "absent"

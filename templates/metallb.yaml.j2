@@ -4,6 +4,12 @@ kind: IPAddressPool
 metadata:
   name: {{_pools[pool].name|default(pool)}}
   namespace: metallb-system
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   addresses:
 {% for address in _pools[pool].addresses %}
@@ -17,19 +23,44 @@ kind: {{_advertisements[advertisement].kind|default('L2Advertisement')}}
 metadata:
   name: {{_advertisements[advertisement].name|default(advertisement)}}
   namespace: metallb-system
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version}}"
 spec:
   ipAddressPools:
 {% for pool in _advertisements[advertisement].pools %}
     - {{pool}}
 {% endfor %}
+{% if _advertisements[advertisement].interfaces is defined %}
+  interfaces:
+{% for interface in _advertisements[advertisement].interfaces %}
+    - {{interface}}
+{% endfor %}
+{% endif %}
+{% if _advertisements[advertisement].hosts is defined %}
+  nodeSelectors:
+{% for host in _advertisements[advertisement].hosts %}
+    - matchLabels:
+        kubernetes.io/hostname: {{host}}
+{% endfor %}
+{% endif %}
 ---
 {% endfor %}
 {% for peer in _bgp_peers %}
 apiVersion: metallb.io/v1beta1
 kind: BGPPeer
 metadata:
-  name: {{_bg_peers[peer].name|default(peer)}}
+  name: {{_bgp_peers[peer].name|default(peer)}}
   namespace: metallb-system
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version}}"
 spec:
   peerAddress: {{_bgp_peers[peer].peerAddress}}
   peerASN: {{_bgp_peers[peer].peerASN|default(64512)}}

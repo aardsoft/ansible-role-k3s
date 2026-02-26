@@ -1,0 +1,24 @@
+{% for pv in pvs %}
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: {{pvs[pv].name|default(pv)}}
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  capacity:
+    storage: 1Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: longhorn
+  csi:
+    driver: io.longhorn
+    fsType: ext4
+    volumeHandle: longhorn-volume-name # replace with your actual Longhorn volume name
+---
+{% endfor %}

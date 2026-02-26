@@ -23,6 +23,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
+    apply: yes
     definition: "{{lookup('template', 'metallb.yaml.j2')}}"
   vars:
     _pools: "{{_k3s_cfg.metallb.pools|default({})}}"

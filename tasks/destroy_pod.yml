@@ -1,0 +1,118 @@
+# Removes all k8s resources for a k3s-pod marked state: absent.
+# Called with _pod as loop variable: {key: pod_name, value: pod_definition}
+
+- name: set pod teardown facts
+  set_fact:
+    _pod_name: "{{_pod.key}}"
+    _pod_namespace: "{{(_pod.value.k3s|default({})).namespace|default(_pod.key)}}"
+    _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
+
+- name: delete workload
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: apps/v1
+      kind: "{{_pod_workload_type}}"
+      metadata:
+        name: "{{_pod_name}}"
+        namespace: "{{_pod_namespace}}"
+
+- name: query ansible-managed services for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Service
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _pod_services
+
+- name: delete LoadBalancer services
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_pod_services.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+
+# PVCs are queried by label so that volumes renamed or removed before teardown
+# are still caught.  The pvc-protection finalizer ensures K8s waits for pods
+# to release the volume before completing the deletion.
+- name: query ansible-managed PVCs for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: PersistentVolumeClaim
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _pod_pvcs
+
+- name: delete PersistentVolumeClaims
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_pod_pvcs.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+
+- name: query ansible-managed ConfigMaps for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: ConfigMap
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _pod_configmaps
+
+- name: delete ConfigMaps
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_pod_configmaps.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+
+- name: query ansible-managed Secrets for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Secret
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _pod_secrets
+
+- name: delete Secrets
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_pod_secrets.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"

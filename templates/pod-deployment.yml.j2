@@ -1,0 +1,134 @@
+apiVersion: apps/v1
+kind: {{_pod_workload_type}}
+metadata:
+  name: {{_pod_name}}
+  namespace: {{_pod_namespace}}
+  labels:
+    app: {{_pod_name}}
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+{% if _pod_workload_type == 'Deployment' %}
+  replicas: 1
+{% endif %}
+  selector:
+    matchLabels:
+      app: {{_pod_name}}
+  template:
+    metadata:
+      labels:
+        app: {{_pod_name}}
+{% if _pod_labels is defined %}
+{% for label_key, label_value in _pod_labels.items() %}
+        {{label_key}}: "{{label_value}}"
+{% endfor %}
+{% endif %}
+    spec:
+{% if _pod_tolerations | length > 0 %}
+      tolerations:
+{% for toleration in _pod_tolerations %}
+      - effect: {{toleration.effect | default('NoSchedule')}}
+        operator: {{toleration.operator | default('Exists')}}
+{% if toleration.key is defined %}
+        key: {{toleration.key}}
+{% endif %}
+{% if toleration.value is defined %}
+        value: "{{toleration.value}}"
+{% endif %}
+{% endfor %}
+{% endif %}
+      containers:
+{% for container_name, container in _pod_containers.items() %}
+      - name: {{container_name}}
+        image: {{container.image}}
+{% if container.args is defined %}
+        args:
+{% for arg in container.args %}
+        - "{{arg}}"
+{% endfor %}
+{% endif %}
+{% if container.ports is defined %}
+        ports:
+{% for port in container.ports %}
+        - containerPort: {{port.containerPort|default(port)}}
+{% if port.protocol is defined %}
+          protocol: {{port.protocol}}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% if container.env is defined %}
+        env:
+{% for env_name, env_value in container.env.items() %}
+        - name: {{env_name}}
+          value: "{{env_value}}"
+{% endfor %}
+{% endif %}
+{% if container.resources is defined %}
+        resources:
+{% if container.resources.requests is defined %}
+          requests:
+{% for res_key, res_value in container.resources.requests.items() %}
+            {{res_key}}: {{res_value}}
+{% endfor %}
+{% endif %}
+{% if container.resources.limits is defined %}
+          limits:
+{% for res_key, res_value in container.resources.limits.items() %}
+            {{res_key}}: {{res_value}}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if container.volumeMounts is defined %}
+{% set _active_mounts = (container.volumeMounts | selectattr('state', 'undefined') | list) + (container.volumeMounts | selectattr('state', 'defined') | rejectattr('state', 'equalto', 'absent') | list) %}
+{% if _active_mounts | length > 0 %}
+        volumeMounts:
+{% for mount in _active_mounts %}
+        - name: {{mount.name}}
+          mountPath: {{mount.mountPath}}
+{% if mount.subPath is defined %}
+          subPath: {{mount.subPath}}
+{% endif %}
+{% if mount.readOnly is defined %}
+          readOnly: {{mount.readOnly | lower}}
+{% endif %}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% if _pod_volumes is defined and _pod_volumes | length > 0 %}
+      volumes:
+{% for volume in _pod_volumes %}
+      - name: {{volume.name}}
+{% if volume.persistentVolumeClaim is defined %}
+        persistentVolumeClaim:
+          claimName: {{volume.persistentVolumeClaim.claimName}}
+{% endif %}
+{% if volume.emptyDir is defined %}
+        emptyDir: {}
+{% endif %}
+{% if volume.hostPath is defined %}
+        hostPath:
+          path: {{volume.hostPath.path}}
+{% if volume.hostPath.type is defined %}
+          type: {{volume.hostPath.type}}
+{% endif %}
+{% endif %}
+{% if volume.configMap is defined %}
+        configMap:
+          name: {{volume.configMap.name}}
+{% if volume.configMap.defaultMode is defined %}
+          defaultMode: {{volume.configMap.defaultMode}}
+{% endif %}
+{% endif %}
+{% if volume.secret is defined %}
+        secret:
+          secretName: {{volume.secret.secretName}}
+{% if volume.secret.defaultMode is defined %}
+          defaultMode: {{volume.secret.defaultMode}}
+{% endif %}
+{% endif %}
+{% endfor %}
+{% endif %}

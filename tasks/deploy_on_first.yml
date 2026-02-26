@@ -1,3 +1,18 @@
+# if we've come that far we should have a basic cluster running, so dump info
+- name: get Cluster information
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Config
+  register: cluster_info
+
+- debug:
+    msg: "k3s cluster information: {{cluster_info|to_nice_json}}"
+
+- name: Show cluster name
+  debug:
+    msg: "Cluster name is {{ cluster_info.resources[0].name }}"
+  when: cluster_info.resources[0].name is defined
+
 - include_tasks: deploy_longhorn.yml
   when: >
     _k3s_cfg.longhorn is defined and
@@ -27,3 +42,7 @@
   with_dict: "{{_k3s_cfg.deployments|default({})}}"
   loop_control:
     loop_var: _deployment
+
+- name: manage k3s pods
+  include_tasks: manage_pods.yml
+  when: network_pods is defined and network_pods | length > 0

@@ -1,0 +1,716 @@
+#+TITLE: Ansible role: k3s
+
+* Introduction
+
+This role provides simple bootstrapping of a [[https://k3s.io/][k3s]] cluster, as well as the means to deploy additional components into such a cluster.
+
+Unlike other existing roles the focus is to keep complexity low to both keep debugging simple and close to vanilla k3s setups, as well as not force the use of specific components. To still enable more complex setups two mechanisms exist to deploy from within the role:
+
+- setup scripts for some common components (metallb, longhorn) are included with this repository.
+- arbitrary components can be configured via the =deployments= configuration key. This will use setup scripts from a separate role. Some examples exist in the [[https://github.com/aardsoft/ansible-role-k3s-deployments][k3s-deployments]] role.
+- hosts of type =k3s-pod= in =site.yaml= are managed as Kubernetes Deployments or DaemonSets, with their full lifecycle (namespaces, PVCs, ConfigMaps, Services) handled by the role.
+
+The main configuration follows this structure:
+
+#+BEGIN_SRC yaml
+  k3s:
+    args: --disable=servicelb
+    first_server: 172.31.248.5
+    bind_cidr: 172.31.248.0/24
+    test_cluster: false
+    metallb:
+      state: absent
+    longhorn:
+      state: absent
+    deployments:
+      deployment-name:
+        role: source-role-of-deployment
+        name: name-of-source-file
+        state: present
+#+END_SRC
+
+* Quick reference for common operations
+
+#+begin_src shell
+# cluster status
+kubectl get nodes
+kubectl get pods -A
+
+# run the role
+ansible-playbook -l k3s_nodes playbooks/k3s.yml
+
+# upgrade k3s binary
+ansible-playbook -l k3s_nodes playbooks/k3s.yml -e k3s_upgrade=true
+
+# inspect generated manifests without applying
+ansible-playbook -l k3s_nodes playbooks/k3s.yml -e _k3s_debug_path=/tmp/k3s-debug
+#+end_src
+
+** Debugging Longhorn
+
+Inspect volumes, PVs, and PVCs to verify resources exist and are bound correctly:
+
+#+begin_src shell
+kubectl -n longhorn-system get volumes.longhorn.io
+kubectl get pv
+kubectl get pvc -n kube-system
+#+end_src
+
+Apply individual resource manifests during manual setup or debugging:
+
+#+begin_src shell
+kubectl apply -f longhorn-example-volume.yml
+kubectl apply -f longhorn-example-volume-pv.yml
+kubectl apply -f longhorn-example-volume-pvc.yml
+#+end_src
+
+Clean up a manually created test volume and its dependent resources. Resources must be deleted in reverse dependency order — the pod first, then PVC, PV, and finally the Longhorn volume:
+
+#+begin_src shell
+kubectl -n kube-system delete pod volume-test
+kubectl delete pvc -n kube-system longhorn-example-volume-pvc
+kubectl delete pv longhorn-example-volume-pv
+kubectl -n longhorn-system delete volume longhorn-example-volume
+#+end_src
+
+A volume can also be deleted directly:
+
+#+begin_src shell
+kubectl -n longhorn-system delete volume longhorn-example-volume
+#+end_src
+
+Note that deleting a Longhorn volume while a PV/PVC still references it will leave the PV in a =Failed= state. Always delete dependent resources first.
+
+If a PVC is stuck in =Terminating=, it is likely still in use by a pod. The =kubernetes.io/pvc-protection= finalizer prevents deletion until all pods have released the volume. Check which pods reference the PVC:
+
+#+begin_src shell
+kubectl describe pvc -n <namespace> <pvc-name>
+kubectl get pods -n <namespace> -o json | \
+  jq '.items[] | select(.spec.volumes[]?.persistentVolumeClaim.claimName=="<pvc-name>") | .metadata.name'
+#+end_src
+
+* Configuration tracking
+
+All resources configured via ansible should have the following snippet in the =metadata= section:
+
+#+BEGIN_SRC yaml
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+#+END_SRC
+
+* Configuration
+** main
+*** =args=
+Arbitrary arguments to pass to =k3s=. When using MetalLB this must include =--disable=servicelb=. See [[https://docs.k3s.io/cli/server][the k3s server documentation]] for all available arguments.
+
+*** =bind_cidr=
+The CIDR network range used for cluster communication. When set, the role iterates the server's network interfaces and finds the one whose IPv4 network matches the supplied CIDR. That interface's address is then passed as both =-i= and =--bind-address= to k3s, restricting management services to that interface.
+
+It is recommended to set this for security reasons — without it k3s management services listen on all interfaces. This is non-trivial to change after initial deployment.
+
+*** =bind_args=
+Arbitrary bind arguments to pass to =k3s=.
+
+*** =cluster_cidr=
+Pass =--cluster-cidr= to =k3s= to set the pod IPs. Default is =10.42.0.0/16=.
+
+*** =extra_tasks=
+A list of task file names to load and run at the end of the role, run against all cluster members in the play. A task file =sampletask= will be loaded from =tasks/sampletask.yml= within the k3s role.
+
+ There also is a top-level variable =k3s_extra_tasks= outside of the k3s dict that works identically but is set at the host or group level independently of any cluster config. Both lists are processed if defined; cluster config tasks run first.
+
+The included tasks run unconditionally against all hosts in the play — any limiting to specific nodes or roles must be done inside the included task file itself.
+
+*** =first_server=
+The address of the first server. Typically this is the first server where k3s was installed, but can be any of the master servers.
+
+Operations changing the overall cluster state are only run against the first server, and the cluster token is dynamically pulled from there: so when adding new hosts, or updating the token on an existing host the first server always needs to be in the play.
+
+*** =kubecfg=
+The path to the kubeconfig file, defaulting to =/etc/rancher/k3s/k3s.yaml=. This is not changing the location for the file during installation, but required for =kubectl= to talk to the cluster. Most likely this never needs to be changed from its default.
+
+*** =kubeconfig_mode=
+The file mode of the configuration file, defaulting to =0600=. This should be a sensible secure default.
+
+*** =node_token_passdb=
+A passdb entry to store the cluster token on setup. While this provides the ability to setup extra nodes without having the first server in the play it is not recommended as the token does get updated during the clusters lifetime, and therefore would need to be refreshed occasionally.
+
+*** =service_cidr=
+Pass =--service-cidr= to =k3s= to set the service IPs. Default is =10.43.0.0/16=.
+
+*** =test_cluster=
+Can be set to =true= or =false=. This will create a hello world container, create ingress routing for it, and check if it is reachable, before removing it again.
+
+It is recommended to enable this when creating a new cluster, and disabling it after that.
+
+** metallb
+*** =metallb.pools=
+Named address pools, mandatory field =addresses= takes a list of one or more addresses, either as CIDR or range:
+
+#+BEGIN_SRC yaml
+      main:
+        addresses:
+          - 192.168.32.150 - 192.168.32.180
+      dmz:
+        addresses:
+          - 172.31.255.128/29
+      management:
+        addresses:
+          - 192.168.33.128/29
+#+END_SRC
+
+*** =metallb.bgp_peers=
+Named BGP peers. Mandatory field =peerAddress=, optional fields:
+
+- name (default: key)
+- peerASN (default: 64512)
+- myASN (default: 64513)
+- ttl (default: 255)
+
+*** =metallb.advertisements=
+Named advertisement, mandatory field =pools= takes a list of =metallb.pools=. Optional argument =kind= specifies the type of metallb advertisement, =L2Advertisement= or =BGPAdvertisement=. When omitted defaults to =L2Advertisement=.
+
+- =interfaces= specifies a list of interfaces to announce on
+- =hosts= a list of host names to use as node selector
+
+=L2Advertisement= is used for addresses expected to be used in the local broadcast domain only, while =BGPAdvertisement= is used for routed addresses. In case both is needed two entries - one for each type - can be generated.
+
+*** =metallb.state=
+
+=present= installs or updates metallb. =absent= removes it.
+
+** Traefik
+
+k3s deploys Traefik as the default ingress controller. No additional configuration is required for basic use.
+
+*** =management_hostname=
+
+When set, service deployments that support a management UI (currently longhorn) create an additional Ingress at =<service>.<management_hostname>=. Pair with the =management-ui= deployment from [[https://github.com/aardsoft/ansible-role-k3s-deployments][k3s-deployments]], which configures the Traefik LoadBalancer IP, BasicAuth middleware, and Forecastle landing page.
+
+** longhorn
+
+*** =longhorn.state=
+
+=present= installs Longhorn. =absent= removes it.
+
+*** =longhorn.ui_ingress.metadata= and =longhorn.ui_ingress.spec=
+
+Raw Kubernetes Ingress =metadata= and =spec= dicts passed through directly. For the standard management UI setup use =management_hostname= (see [[*Traefik]]) instead.
+
+** deployments
+
+The =deployments= key under the cluster config allows deploying additional components into the cluster using task files from an external role. The default role is =k3s-deployments= (see [[https://github.com/aardsoft/ansible-role-k3s-deployments][k3s-deployments]]).
+
+#+BEGIN_SRC yaml
+k3s:
+  deployments:
+    my-component:
+      role: k3s-deployments       # role to load tasks from (default: k3s-deployments)
+      name: component-name        # task file name (default: deployment key)
+      state: present              # present (default) or absent
+      config:                     # optional config passed as cfg_values to the task
+        key: value
+#+END_SRC
+
+When =state= is =present=, the task file =deploy-{name}= is loaded from the specified role. When =state= is =absent=, =destroy-{name}= is loaded. The =config= dict (if set) is available inside the task as the =cfg_values= variable.
+
+** Host and group variables
+
+These variables are set at the host or group level (e.g. in =group_vars= or =host_vars=), not inside the =k3s:= configuration dict.
+
+*** =k3s_role=
+Whether this node is a cluster server or agent. Must be set to =server= for control-plane nodes. Defaults to =agent=, which means nodes without this variable set will attempt to join as workers. Cluster-level deployments (metallb, longhorn, pods) only run on nodes where =k3s_role= is =server= and =_first_server= is =true=.
+
+*** =k3s_cluster= and =k3s_clusters=
+Allows defining multiple named cluster configurations and selecting between them per-host. =k3s_clusters= is a dict of cluster name -> config block; =k3s_cluster= selects which entry to use:
+
+#+BEGIN_SRC yaml
+# group_vars/all.yml
+k3s_clusters:
+  production:
+    first_server: 10.0.0.1
+    metallb:
+      state: present
+  staging:
+    first_server: 10.1.0.1
+    metallb:
+      state: present
+
+# host_vars/server1.yml
+k3s_cluster: production
+k3s_role: server
+#+END_SRC
+
+If =k3s_cluster= and =k3s_clusters= are both defined and =k3s_clusters[k3s_cluster]= exists, that entry is used as the cluster config. Otherwise the role falls back to a top-level =k3s:= variable.
+
+*** =k3s_passdb=
+The password store backend to use for secret lookups (e.g. the node token). Defaults to the value of the =passdb= variable if set, otherwise =passwordstore=. Set this to use an alternative Ansible lookup plugin as your secret backend.
+
+*** =k3s_upgrade=
+When set to =true=, forces re-running the k3s installer on nodes even if k3s is already installed. Use this to upgrade the k3s binary. The installer is re-run with the same configuration arguments as the initial install:
+
+#+BEGIN_SRC yaml
+# ansible-playbook -l k3s_nodes playbooks/k3s.yml -e k3s_upgrade=true
+#+END_SRC
+
+*** =k3s_extra_tasks=
+Top-level equivalent of =k3s.extra_tasks= (see above). A list of task file names run against all cluster members after the rest of the role completes. Useful when you want to run extra tasks independently of any specific cluster config.
+
+*** =local_bin=
+Directory where the k3s installer script and Longhorn environment check script are copied. Defaults to =/usr/local/bin=. Override if your system uses a different location for locally-installed binaries.
+
+When using the =data-utilities= role this variable is managed by that.
+
+*** =transactional_system=
+Set to =true= on systems that use transactional updates and require a reboot to apply changes (e.g. openSUSE MicroOS, Leap Micro). When set, the role issues a reboot after the k3s installer runs and waits up to 600 seconds for the system to come back before continuing.
+
+When using the =data-utilities= role this variable is managed by that.
+
+*** =python_version=
+The Python version suffix used when installing the =python-kubernetes= package. On openSUSE Leap the role always uses =3= regardless of this variable (since only the generic =python3-kubernetes= package is available). On other distributions the value of =python_version= is appended directly, e.g. =python3.11-kubernetes=.
+
+When using the =data-utilities= role this variable is managed by that.
+
+*** =_k3s_debug_path=
+When defined, generated Kubernetes manifests are written to this local directory before being applied. This is useful for inspecting what the role is about to apply without running against a live cluster. Currently saves:
+
+- =metallb.yaml= — the rendered metallb pool/advertisement config
+- ={pod-name}-deployment.yaml= — the rendered Deployment or DaemonSet for each pod
+
+#+BEGIN_SRC yaml
+# ansible-playbook -l storage1 playbooks/k3s.yml -e _k3s_debug_path=/tmp/k3s-debug
+#+END_SRC
+
+** k3s-pod
+
+Hosts of type =k3s-pod= in =site.yaml= are managed as Kubernetes workloads (Deployment or DaemonSet). The role handles the full lifecycle: namespace, ConfigMaps, PersistentVolumeClaims, the workload itself, and LoadBalancer Services via metallb.
+
+Pods are processed on the first server of the cluster they reference (=k3s.cluster=). All ansible-managed resources carry =configurator: ansible= and =app: <pod-name>= labels, which the role uses to detect and clean up stale resources when configuration changes.
+
+All managed resources use =apply= semantics so that field removals (e.g. removing a port, volumeMount, or ConfigMap key) propagate correctly to the running cluster on the next ansible run.
+
+*** Complete YAML syntax reference
+
+#+BEGIN_SRC yaml
+pod-name:
+  type: k3s-pod
+  groups: group-name         # inventory group(s); controls which group_vars apply
+  k3s:
+    cluster: hostname        # k3s first-server hostname; pod runs on this host
+    namespace: my-ns         # kubernetes namespace (default: pod-name)
+    workload_type: DaemonSet # Deployment (default) or DaemonSet
+    state: absent            # omit or set to 'absent' to tear down
+    default_container: name  # container for ansible sshkubectl (auto-set for single-container pods)
+    labels:                  # extra labels added to pod template metadata
+      my-label: my-value
+  network:
+    if1:                     # interface key; becomes part of Service name: <pod>-if1
+      ipv4: 1.2.3.4/24       # metallb LoadBalancer IP (CIDR notation)
+      link: container-name   # single container whose ports define the Service ports
+      links:                 # alternative to link: aggregate ports from multiple containers
+        - container-a
+        - container-b
+  pod:
+    tolerations:             # pod-level tolerations (useful for DaemonSets)
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        key: node-role.kubernetes.io/control-plane
+        operator: Exists
+    configmaps:              # ConfigMaps created and managed alongside the pod
+      - name: my-config
+        data:
+          config.yaml: |
+            key: value
+    secrets:                 # Secrets managed alongside the pod
+      - name: my-secret
+        generate: ssh-host-keys  # auto-generate an Ed25519 host key pair
+    volumes:                 # volumes available to containers
+      - name: vol-name
+        persistentVolumeClaim:
+          claimName: my-pvc        # PVC name; PVC is created/deleted with the pod
+          storageClass: longhorn   # storage class (default: longhorn)
+          size: 1Gi                # storage size (default: 1Gi)
+          accessMode: ReadWriteOnce
+      - name: shared-mem
+        emptyDir: {}
+      - name: host-logs
+        hostPath:
+          path: /var/log/pods
+          type: ""           # optional: Directory, File, Socket, etc.
+      - name: my-config
+        configMap:
+          name: my-config    # references a ConfigMap (managed or pre-existing)
+      - name: my-secret
+        secret:
+          secretName: my-secret  # references a Secret (managed or pre-existing)
+          defaultMode: 0400      # optional: file permission mode (octal)
+    containers:
+      container-name:
+        image: image:tag
+        args:
+          - -flag=value      # command-line arguments passed to the container
+        ports:
+          - containerPort: 80
+          - containerPort: 443
+            protocol: TCP
+        env:
+          ENV_VAR: value
+          OTHER_VAR: other-value
+        resources:
+          requests:
+            cpu: 100m
+            memory: 128Mi
+          limits:
+            cpu: 500m
+            memory: 512Mi
+        volumeMounts:
+          - name: vol-name
+            mountPath: /data
+            readOnly: true   # optional
+            subPath: file    # optional: mount a single key from a Secret/ConfigMap
+          - name: old-vol
+            mountPath: /old
+            state: absent    # remove this mount without removing the volume entry
+#+END_SRC
+
+*** =k3s= options
+
+- =cluster= Hostname of the k3s cluster's =first_server= node. The pod will only be processed when ansible runs against this host. Required.
+- =namespace= Kubernetes namespace. Defaults to the pod name. The namespace is created automatically if it does not exist.
+- =workload_type= =Deployment= (default) or =DaemonSet=. Use =DaemonSet= for workloads that must run on every node (log collectors, monitoring agents, etc.).
+- =state= :: When set to =absent=, the workload, its Services, PVCs, ConfigMaps, and Secrets are all removed. Resources are removed in order: workload -> services -> PVCs -> ConfigMaps -> Secrets.
+- =default_container= The container to target when ansible connects via sshkubectl. Automatically set for single-container pods; must be explicit for multi-container pods if you want =ansible pod-name= to target a specific container.
+- =labels= Extra labels added to the pod template metadata. Useful for pod selectors or Prometheus scraping.
+
+*** =network= options
+
+Each key under =network= maps to one LoadBalancer Service. The Service name is =<pod-name>-<interface-key>=.
+
+- =ipv4= IPv4 address in CIDR notation. The address portion is used as the metallb =spec.loadBalancerIP=.
+- =link= Name of a single container. The Service ports are derived from that container's =ports= list.
+- =links= List of container names. Port lists from all named containers are merged into a single Service. Use this when one IP should serve ports from multiple containers (e.g. HTTP on one container, SSH on another).
+
+A Service is only created when the referenced container(s) have ports defined. Stale Services (removed from =network= config) and Services carrying the deprecated =metallb.universe.tf/loadBalancerIPs= annotation are deleted before the current Services are applied, ensuring clean migration between metallb configuration formats.
+
+*** =pod.tolerations=
+
+List of Kubernetes tolerations applied to the pod spec. Particularly useful for DaemonSets that should run on control-plane nodes.
+
+#+BEGIN_SRC yaml
+tolerations:
+  - effect: NoSchedule        # tolerate all NoSchedule taints
+    operator: Exists
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoExecute
+#+END_SRC
+
+*** =pod.configmaps=
+
+List of ConfigMaps to create and manage alongside the pod. ConfigMaps are created before the workload so they are available at pod start. Stale ConfigMaps (removed from the list) are deleted after the workload is updated.
+
+Each entry requires:
+- =name= ConfigMap name (must be unique within the namespace).
+- =data= Map of key -> value. Multi-line values use YAML block literal syntax (=|=).
+
+#+BEGIN_SRC yaml
+configmaps:
+  - name: app-config
+    data:
+      config.yaml: |
+        server:
+          port: 8080
+      another-key: single-line-value
+#+END_SRC
+
+*** =pod.secrets=
+
+List of Kubernetes Secrets managed alongside the pod. Secrets are created before the workload so they are available at pod start. Stale Secrets (removed from the list) are deleted after the workload is updated. On teardown, all Secrets labelled =app: <pod-name>= and =configurator: ansible= are deleted.
+
+Each entry requires:
+- =name= Secret name (must be unique within the namespace).
+- =generate= Key generation method. Currently only =ssh-host-keys= is supported.
+
+The =ssh-host-keys= generator creates an Ed25519 host key pair idempotently. If the named Secret already exists in the cluster it is left unchanged, so the host keys remain stable across pod restarts and redeployments.
+
+#+BEGIN_SRC yaml
+secrets:
+  - name: my-pod-ssh-host-keys
+    generate: ssh-host-keys
+#+END_SRC
+
+The Secret is stored with =type: Opaque= and contains two keys:
+- =ssh_host_ed25519_key= — the private host key
+- =ssh_host_ed25519_key.pub= — the corresponding public key
+
+To use it with =lscr.io/linuxserver/openssh-server=, mount the Secret to a neutral path outside =/config/= and use a =custom-cont-init.d= script to copy the keys before the openssh-server init runs. LinuxServer images support this by design: scripts placed in =/custom-cont-init.d/= execute before any application init service, and sshd's init skips key generation if keys already exist in =/config/ssh_host_keys/=.
+
+#+BEGIN_SRC yaml
+configmaps:
+  - name: my-pod-ssh-init
+    data:
+      copy-host-keys.sh: |
+        #!/usr/bin/with-contenv bash
+        mkdir -p /config/ssh_host_keys
+        cp /run/ssh-keys/ssh_host_ed25519_key /config/ssh_host_keys/ssh_host_ed25519_key
+        cp /run/ssh-keys/ssh_host_ed25519_key.pub /config/ssh_host_keys/ssh_host_ed25519_key.pub
+        chmod 600 /config/ssh_host_keys/ssh_host_ed25519_key
+        chmod 644 /config/ssh_host_keys/ssh_host_ed25519_key.pub
+
+volumes:
+  - name: ssh-host-keys
+    secret:
+      secretName: my-pod-ssh-host-keys
+      defaultMode: 0400
+  - name: ssh-init-script
+    configMap:
+      name: my-pod-ssh-init
+      defaultMode: 0755     # must be executable for s6-overlay to run it
+
+containers:
+  sshd:
+    volumeMounts:
+      - name: ssh-host-keys
+        mountPath: /run/ssh-keys
+        readOnly: true
+      - name: ssh-init-script
+        mountPath: /custom-cont-init.d
+#+END_SRC
+
+The Kubernetes Secret volume's tmpfs is always read-only at the kernel level — =chown= and =chmod= calls on files inside a secret mount fail with =EROFS= regardless of the =readOnly:= setting in the volumeMount spec. Mounting the Secret to =/run/ssh-keys= (outside =/config/=) keeps it away from the linuxserver init scripts that aggressively chown =/config/=. The copy script runs first, places writable copies with correct permissions in =/config/ssh_host_keys/=, and the standard openssh-server init then finds and uses those files.
+
+*** =pod.volumes=
+
+List of volumes declared in the pod spec. The role supports five volume types:
+
+**** PersistentVolumeClaim
+
+PVCs are created and deleted alongside the pod. The =storageClass=, =size=, and =accessMode= fields are role-level configuration used to create the PVC; only =claimName= is passed to the Kubernetes pod spec.
+
+#+BEGIN_SRC yaml
+- name: data
+  persistentVolumeClaim:
+    claimName: my-app-data
+    storageClass: longhorn    # default: longhorn
+    size: 10Gi                # default: 1Gi
+    accessMode: ReadWriteOnce # default: ReadWriteOnce
+#+END_SRC
+
+PVCs are not deleted during teardown if the volume is still referenced in =pod.volumes=. To remove a PVC: first remove the volume entry (or mark the pod =state: absent=) and re-run, then the stale PVC cleanup pass will issue the delete. The =kubernetes.io/pvc-protection= finalizer ensures data is not deleted until all pods have released the volume.
+
+**** emptyDir
+
+Ephemeral volume, lost when the pod restarts. Useful for shared scratch space between containers or for state that does not need to persist.
+
+#+BEGIN_SRC yaml
+- name: cache
+  emptyDir: {}
+#+END_SRC
+
+**** hostPath
+
+Mounts a path from the host node's filesystem. Primarily used for DaemonSets that need to access host-level resources (logs, device files, etc.).
+
+#+BEGIN_SRC yaml
+- name: pod-logs
+  hostPath:
+    path: /var/log/pods
+    type: ""              # optional; leave empty for default behaviour
+#+END_SRC
+
+**** configMap
+
+Mounts a ConfigMap as a directory, with each key becoming a file. The ConfigMap can be one declared in =pod.configmaps= or a pre-existing cluster resource.
+
+#+BEGIN_SRC yaml
+- name: my-config
+  configMap:
+    name: my-config
+    defaultMode: 0755    # optional; default is 0644. Use 0755 for executable scripts.
+#+END_SRC
+
+**** secret
+
+Mounts a Secret as a directory, with each key becoming a file. The Secret can be one declared in =pod.secrets= or a pre-existing cluster resource. Use =defaultMode= to control file permissions; SSH private keys require =0400=.
+
+#+BEGIN_SRC yaml
+- name: my-secret
+  secret:
+    secretName: my-secret
+    defaultMode: 0400    # optional; default is 0644
+#+END_SRC
+
+To mount a single key from a Secret into an existing directory (rather than replacing the entire directory), use =subPath= on the volumeMount:
+
+#+BEGIN_SRC yaml
+volumeMounts:
+  - name: my-secret
+    mountPath: /etc/ssh/ssh_host_ed25519_key
+    subPath: ssh_host_ed25519_key
+    readOnly: true
+#+END_SRC
+
+*** =pod.containers=
+
+Map of container name -> container definition. Multiple containers in one pod share the same network namespace and can share volumes.
+
+- =image= Container image, including tag. Required.
+- =args= List of command-line arguments passed to the container entrypoint.
+- =ports= List of =containerPort= entries. Ports declared here are used to populate LoadBalancer Service definitions. Optional =protocol= field (default TCP).
+- =env= Map of environment variable name -> value.
+- =resources= =requests= and =limits= maps with standard Kubernetes resource keys (=cpu=, =memory=).
+- =volumeMounts= List of volume mounts. Each entry requires =name= (matching a =pod.volumes= entry) and =mountPath=. Optional =readOnly: true=. Optional =subPath=: mount a single key from a Secret or ConfigMap volume at the given path without replacing the parent directory.
+
+**** Removing a volumeMount without removing the volume
+
+Set =state: absent= on a mount entry to remove it from the container spec without removing the underlying PVC:
+
+#+BEGIN_SRC yaml
+volumeMounts:
+  - name: active-data
+    mountPath: /data
+  - name: old-scratch
+    mountPath: /tmp/old
+    state: absent          # mount removed from container on next run
+#+END_SRC
+
+This triggers a rolling update. Once the rolling update completes and pods no longer reference the volume, remove the entry from =pod.volumes= as well to trigger PVC deletion.
+
+*** Lifecycle and state management
+
+Resources are created in dependency order (namespace -> ConfigMaps -> Secrets -> PVCs -> workload -> Services). Stale resources removed from config are deleted after the workload is updated.
+
+Teardown (=state: absent=) removes all resources in reverse order. PVC deletion is protected by =kubernetes.io/pvc-protection=: the PVC enters =Terminating= immediately but is not removed until all pods have released it.
+
+*** Ansible inventory integration (sshkubectl)
+
+Hosts of type =k3s-pod= are added to =k3s_pods= with =ansible_connection: sshkubectl=, which opens a SSH connection to the k3s master and runs =kubectl exec=. The inventory plugin generates =pod-name= (default container) and =pod-name-cnt-<container>= (per-container) host entries.
+
+*** Examples
+
+**** Minimal single-container pod
+
+Serves HTTP on a metallb IP. Namespace defaults to the pod name (=my-app=).
+
+#+BEGIN_SRC yaml
+my-app:
+  type: k3s-pod
+  groups: k3s_example
+  k3s:
+    cluster: storage1
+  network:
+    if1:
+      ipv4: 192.168.33.128/24
+      link: web
+  pod:
+    containers:
+      web:
+        image: nginx:stable-alpine
+        ports:
+          - containerPort: 80
+#+END_SRC
+
+**** Multi-container pod with shared Longhorn volume
+
+Two containers sharing one PVC. Both ports are exposed on the same IP using =links=. The default ansible connection target is the =web= container.
+
+#+BEGIN_SRC yaml
+my-app:
+  type: k3s-pod
+  groups: k3s_example
+  k3s:
+    cluster: storage1
+    default_container: web
+  network:
+    if1:
+      ipv4: 192.168.33.129/24
+      links:
+        - web
+        - sshd
+  pod:
+    secrets:
+      - name: my-app-ssh-host-keys
+        generate: ssh-host-keys
+    volumes:
+      - name: site-data
+        persistentVolumeClaim:
+          claimName: my-app-data
+          storageClass: longhorn
+          size: 5Gi
+      - name: ssh-host-keys
+        secret:
+          secretName: my-app-ssh-host-keys
+          defaultMode: 0400
+    containers:
+      web:
+        image: nginx:stable-alpine
+        ports:
+          - containerPort: 80
+        volumeMounts:
+          - name: site-data
+            mountPath: /usr/share/nginx/html
+      sshd:
+        image: lscr.io/linuxserver/openssh-server:latest
+        ports:
+          - containerPort: 2222
+        env:
+          PUBLIC_KEY: "ssh-ed25519 AAAA..."
+          USER_NAME: ansible
+          SUDO_ACCESS: "true"
+        volumeMounts:
+          - name: site-data
+            mountPath: /shared
+          - name: ssh-host-keys
+            mountPath: /config/ssh_host_keys
+#+END_SRC
+
+**** DaemonSet with hostPath volumes and tolerations
+
+Runs on every node including control-plane nodes.
+
+#+BEGIN_SRC yaml
+log-collector:
+  type: k3s-pod
+  groups: k3s_example
+  k3s:
+    cluster: storage1
+    namespace: logging
+    workload_type: DaemonSet
+  pod:
+    tolerations:
+      - effect: NoSchedule
+        operator: Exists
+    volumes:
+      - name: pod-logs
+        hostPath:
+          path: /var/log/pods
+      - name: positions
+        emptyDir: {}
+      - name: collector-config
+        configMap:
+          name: collector-config
+    containers:
+      collector:
+        image: collector:latest
+        volumeMounts:
+          - name: pod-logs
+            mountPath: /var/log/pods
+            readOnly: true
+          - name: positions
+            mountPath: /run/collector
+          - name: collector-config
+            mountPath: /etc/collector
+#+END_SRC
+
+**** Removing a volume from a running pod
+
+Set =state: absent= on the volumeMount and re-run (rolling update, PVC retained). Then remove the entry from =pod.volumes= and re-run to delete the PVC.
+
+**** Tearing down a pod
+
+Set =k3s.state: absent= and re-run. To keep the PVC data instead, remove the pod definition entirely rather than marking it absent.

@@ -1,0 +1,260 @@
+# Manages a single k3s-pod definition from network_nodes/network_pods.
+# Called with _pod as loop variable: {key: pod_name, value: pod_definition}
+
+- name: set pod facts
+  set_fact:
+    _pod_name: "{{_pod.key}}"
+    _pod_namespace: "{{(_pod.value.k3s|default({})).namespace|default(_pod.key)}}"
+    _pod_containers: "{{(_pod.value.pod|default({})).containers|default({})}}"
+    _pod_networks: "{{_pod.value.network|default({})}}"
+    _pod_labels: "{{(_pod.value.k3s|default({})).labels|default({})}}"
+    _pod_volumes: "{{(_pod.value.pod|default({})).volumes|default([])}}"
+    # TODO, actually do something with that
+    _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
+    _pod_tolerations: "{{(_pod.value.pod|default({})).tolerations|default([])}}"
+    _pod_configmaps: "{{(_pod.value.pod|default({})).configmaps|default([])}}"
+    _pod_secrets: "{{(_pod.value.pod|default({})).secrets|default([])}}"
+
+- name: create namespace
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{_pod_namespace}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
+  when: _pod_namespace != 'default'
+
+- name: create ConfigMaps for pod
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{lookup('template', 'pod-configmap.yml.j2')}}"
+  loop: "{{_pod_configmaps}}"
+  loop_control:
+    loop_var: _configmap
+    label: "{{_configmap.name}}"
+
+- name: generate Secrets for pod
+  include_tasks: generate_ssh_host_key_secret.yml
+  loop: "{{_pod_secrets | selectattr('generate', 'defined') | list}}"
+  loop_control:
+    loop_var: _gen_secret
+    label: "{{_gen_secret.name}}"
+
+- name: create PersistentVolumeClaims for pod volumes
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('template', 'pod-pvc.yml.j2')}}"
+  loop: "{{_pod_volumes}}"
+  loop_control:
+    loop_var: _pvc
+    label: "{{_pvc.name}}"
+  when: _pvc.persistentVolumeClaim is defined
+
+- name: push deployment template for debug
+  become: false
+  connection: local
+  local_action:
+    module: ansible.builtin.template
+    mode: 0600
+    src: pod-deployment.yml.j2
+    dest: "{{_k3s_debug_path}}/{{_pod_name}}-deployment.yaml"
+  when: _k3s_debug_path is defined
+
+# TODO, we also should support daemonset
+- name: deploy pod as Deployment
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{lookup('template', 'pod-deployment.yml.j2')}}"
+  when: _pod_containers | length > 0
+
+- name: warn if no containers defined
+  debug:
+    msg: "WARNING: pod {{_pod_name}} has no containers defined, skipping deployment"
+  when: _pod_containers | length == 0
+
+# Clean up PVCs for volumes that were removed from config. This runs after the
+# Deployment update so the rolling update has already removed the volumeMount
+# from the pod spec.  The pvc-protection finalizer ensures K8s won't actually
+# delete a PVC until all pods have released it, so there is no data-loss race.
+- name: query ansible-managed PVCs for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: PersistentVolumeClaim
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_pvcs
+
+- name: build expected PVC names from current volume config
+  set_fact:
+    _expected_pvc_names: >-
+      {{ _pod_volumes
+         | selectattr('persistentVolumeClaim', 'defined')
+         | map(attribute='persistentVolumeClaim.claimName')
+         | list }}
+
+- name: remove stale PersistentVolumeClaims
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: PersistentVolumeClaim
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_existing_pod_pvcs.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+  when: item.metadata.name not in _expected_pvc_names
+
+- name: query ansible-managed ConfigMaps for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: ConfigMap
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_configmaps
+
+- name: build expected ConfigMap names from current config
+  set_fact:
+    _expected_configmap_names: >-
+      {{ _pod_configmaps | map(attribute='name') | list }}
+
+- name: remove stale ConfigMaps
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_existing_pod_configmaps.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+  when: item.metadata.name not in _expected_configmap_names
+
+- name: query ansible-managed Secrets for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Secret
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_secrets
+
+- name: build expected Secret names from current config
+  set_fact:
+    _expected_secret_names: >-
+      {{ _pod_secrets | map(attribute='name') | list }}
+
+- name: remove stale Secrets
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: Secret
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_existing_pod_secrets.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+  when: item.metadata.name not in _expected_secret_names
+
+# Query existing services before create/update to handle stale removal and
+# format migrations (e.g. deprecated metallb annotations) in a single pass.
+# Services are deleted unconditionally if stale, or if they carry a deprecated
+# annotation that would conflict with the current spec format.
+- name: query existing ansible-managed services for this pod
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Service
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_services
+
+- name: build expected service names from current network config
+  set_fact:
+    _expected_service_names: >-
+      {{ _pod_networks | dict2items
+         | selectattr('value.ipv4', 'defined')
+         | map(attribute='key')
+         | map('regex_replace', '^', _pod_name ~ '-')
+         | list }}
+
+# this is currently somewhat hardcoded to metallb changes - but should be
+# relatively easy to expand that later on as we hit other syntax changes
+- name: remove stale or format-migrating LoadBalancer services
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: v1
+      kind: Service
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{_pod_namespace}}"
+  loop: "{{_existing_pod_services.resources}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+  when: >
+    item.metadata.name not in _expected_service_names or
+    'metallb.universe.tf/loadBalancerIPs' in (item.metadata.annotations | default({}))
+
+# Create LoadBalancer services for each network interface that has an IP and ports configured.
+# The 'link' field in network config maps an interface to a container name.
+# Only create service if the linked container has ports defined.
+# _iface_ports is computed inside the template from _pod_containers and _network_iface.
+- name: deploy LoadBalancer service for external IP
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{lookup('template', 'pod-service.yml.j2')}}"
+  with_dict: "{{_pod_networks}}"
+  loop_control:
+    loop_var: _network_iface
+  when: >
+    _network_iface.value.ipv4 is defined and
+    ((_network_iface.value.link is defined and
+      _network_iface.value.link in _pod_containers and
+      (_pod_containers[_network_iface.value.link].ports | default([])) | length > 0) or
+     (_network_iface.value.links is defined and
+      _network_iface.value.links | length > 0))
+
+- name: note interfaces without port configuration
+  debug:
+    msg: "Interface {{_network_iface.key}} on pod {{_pod_name}} has no port configuration in container {{_network_iface.value.link|default('(no link)')}}, skipping LoadBalancer service"
+  with_dict: "{{_pod_networks}}"
+  loop_control:
+    loop_var: _network_iface
+  when: >
+    _network_iface.value.ipv4 is defined and
+    _network_iface.value.links is undefined and
+    ((_network_iface.value.link is undefined) or
+     (_network_iface.value.link not in _pod_containers) or
+     ((_pod_containers[_network_iface.value.link].ports | default([])) | length == 0))

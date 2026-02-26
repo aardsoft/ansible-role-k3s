@@ -8,6 +8,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
+    apply: yes
     definition:
       apiVersion: networking.k8s.io/v1
       kind: Ingress

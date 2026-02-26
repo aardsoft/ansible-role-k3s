@@ -1,0 +1,35 @@
+{% if _network_iface.value.links is defined %}
+{% set ns = namespace(iface_ports=[]) %}
+{% for link_name in _network_iface.value.links %}
+{% set ns.iface_ports = ns.iface_ports + (_pod_containers[link_name].ports | default([])) %}
+{% endfor %}
+{% set _iface_ports = ns.iface_ports %}
+{% else %}
+{% set _iface_ports = _pod_containers[_network_iface.value.link].ports | default([]) %}
+{% endif %}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{_pod_name}}-{{_network_iface.key}}
+  namespace: {{_pod_namespace}}
+  labels:
+    app: {{_pod_name}}
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  type: LoadBalancer
+  loadBalancerIP: "{{_network_iface.value.ipv4 | regex_replace('/.*$', '')}}"
+  selector:
+    app: {{_pod_name}}
+  ports:
+{% for port in _iface_ports %}
+  - name: "port-{{port.containerPort|default(port)}}"
+    port: {{port.containerPort|default(port)}}
+    targetPort: {{port.containerPort|default(port)}}
+{% if port.protocol is defined %}
+    protocol: {{port.protocol}}
+{% endif %}
+{% endfor %}
