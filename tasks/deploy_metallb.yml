@@ -19,6 +19,19 @@
     state: present
     definition: "{{lookup('file', 'metallb/metallb-native.yaml')}}"
 
+- name: wait for metallb webhook to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Deployment
+    name: controller
+    namespace: metallb-system
+  register: _metallb_controller
+  until: >
+    _metallb_controller.resources | length > 0 and
+    (_metallb_controller.resources[0].status.availableReplicas | default(0)) > 0
+  retries: 24
+  delay: 5
+
 - name: deploy metallb pools
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
