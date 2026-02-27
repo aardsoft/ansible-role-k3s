@@ -1,0 +1,25 @@
+tolerations:
+  - key: node-role.kubernetes.io/control-plane
+    operator: Exists
+    effect: NoSchedule
+
+configuration:
+  # rebootSentinel is the host path; with useRebootSentinelHostPath=true the
+  # chart mounts its parent directory as /sentinel in the container.
+  # transactional-update creates /run/reboot-needed on the host.
+  rebootSentinel: /run/reboot-needed
+{% if _k3s_cfg.kured.drain_timeout is defined %}
+  drainTimeout: {{ _k3s_cfg.kured.drain_timeout }}
+{% endif %}
+{% if _k3s_cfg.kured.period is defined %}
+  period: {{ _k3s_cfg.kured.period }}
+{% endif %}
+{% if _k3s_cfg.kured.reboot_days is defined %}
+  rebootDays: {{ _k3s_cfg.kured.reboot_days | to_yaml | trim }}
+{% endif %}
+{% if _k3s_cfg.kured.start_time is defined %}
+  startTime: "{{ _k3s_cfg.kured.start_time }}"
+{% endif %}
+{% if _k3s_cfg.kured.end_time is defined %}
+  endTime: "{{ _k3s_cfg.kured.end_time }}"
+{% endif %}

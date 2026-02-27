@@ -37,6 +37,18 @@
     _k3s_cfg.metallb.state is defined and
     _k3s_cfg.metallb.state == 'absent'
 
+- include_tasks: deploy_kured.yml
+  when: >
+    _k3s_cfg.kured is defined and
+    _k3s_cfg.kured.state is defined and
+    _k3s_cfg.kured.state == 'present'
+
+- include_tasks: remove_kured.yml
+  when: >
+    _k3s_cfg.kured is defined and
+    _k3s_cfg.kured.state is defined and
+    _k3s_cfg.kured.state == 'absent'
+
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"

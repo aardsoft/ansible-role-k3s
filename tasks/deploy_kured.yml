@@ -1,0 +1,32 @@
+# Deploy kured for coordinated rolling node reboots on transactional systems
+#
+# kured watches /run/reboot-needed on each node. transactional-update
+# creates this file when a new snapshot is ready. kured then cordons, drains,
+# reboots, and uncordons nodes one at a time.
+#
+# Configuration under _k3s_cfg.kured:
+#   state:         present | absent
+#   namespace:     Kubernetes namespace       (default: kube-system)
+#   version:       kubereboot/kured chart version (default: latest)
+#   drain_timeout: Node drain timeout         (default: 0 = unlimited)
+#   period:        Sentinel check interval    (default: 1h)
+#   reboot_days:   List of days allowed       (default: all days)
+#                  e.g. [mon, tue, wed, thu, fri]
+#   start_time:    Maintenance window start   (24h format, e.g. "2:00")
+#   end_time:      Maintenance window end     (24h format, e.g. "5:00")
+#
+# Check kured deployment with:
+#
+# kubectl get daemonset kured -n kube-system
+# kubectl get pods -n kube-system -l app.kubernetes.io/name=kured -o wide
+
+- name: deploy kured
+  kubernetes.core.helm:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    namespace: "{{_k3s_cfg.kured.namespace|default('kube-system')}}"
+    create_namespace: true
+    name: kured
+    chart_ref: kured
+    chart_repo_url: https://kubereboot.github.io/charts
+    chart_version: "{{_k3s_cfg.kured.version|default(omit)}}"
+    values: "{{lookup('template', 'kured.yml.j2') | from_yaml}}"

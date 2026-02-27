@@ -1,0 +1,6 @@
+- name: remove kured
+  kubernetes.core.helm:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    namespace: "{{_k3s_cfg.kured.namespace|default('kube-system')}}"
+    name: kured
+    state: absent

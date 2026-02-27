@@ -46,6 +46,20 @@ ansible-playbook -l k3s_nodes playbooks/k3s.yml -e k3s_upgrade=true
 ansible-playbook -l k3s_nodes playbooks/k3s.yml -e _k3s_debug_path=/tmp/k3s-debug
 #+end_src
 
+** Kured
+
+Check if Kured is running on all nodes:
+
+#+BEGIN_SRC shell
+kubectl get pods -n kube-system -l app.kubernetes.io/name=kured -o wide
+#+END_SRC
+
+Follow Kured logs:
+
+#+BEGIN_SRC shell
+kubectl logs -n kube-system -l app.kubernetes.io/name=kured -f
+#+END_SRC
+
 ** Debugging Longhorn
 
 Inspect volumes, PVs, and PVCs to verify resources exist and are bound correctly:
@@ -200,6 +214,46 @@ When set, service deployments that support a management UI (currently longhorn) 
 *** =longhorn.ui_ingress.metadata= and =longhorn.ui_ingress.spec=
 
 Raw Kubernetes Ingress =metadata= and =spec= dicts passed through directly. For the standard management UI setup use =management_hostname= (see [[*Traefik]]) instead.
+
+** kured
+
+kured (Kubernetes Reboot Daemon) coordinates rolling node reboots on transactional systems (openSUSE MicroOS, Leap Micro). It watches =/run/reboot-needed= on each node — created by =transactional-update= — and cordons, drains, reboots, and uncordons one node at a time.
+
+On k3s nodes, =rebootmgr= must be disabled to avoid competing with kured. This is handled automatically by the =basic-host= role when =transactional_update.reboot_method: kured= is set.
+
+#+BEGIN_SRC yaml
+k3s:
+  kured:
+    state: present
+    # optional maintenance window:
+    reboot_days: [mon, tue, wed, thu, fri]
+    start_time: "2:00"
+    end_time: "5:00"
+#+END_SRC
+
+*** =kured.state=
+
+=present= deploys kured. =absent= removes it.
+
+*** =kured.namespace=
+
+Kubernetes namespace for kured. Defaults to =kube-system=.
+
+*** =kured.version=
+
+Helm chart version. Omit to use the latest available.
+
+*** =kured.period=
+
+How often kured checks for the sentinel file. Defaults to =1h=.
+
+*** =kured.drain_timeout=
+
+How long to wait for a node drain before giving up. Defaults to =0= (unlimited).
+
+*** =kured.reboot_days=, =kured.start_time=, =kured.end_time=
+
+Restrict reboots to a maintenance window. Days are lowercase three-letter abbreviations (=mon=, =tue=, etc.). Times are 24h format. When unset, reboots are permitted at any time.
 
 ** deployments
 
