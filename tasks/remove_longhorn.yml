@@ -8,34 +8,22 @@
     definition: "{{lookup('file', 'files/longhorn/uninstall.yaml')}}"
   ignore_errors: true
 
-# kubectl get job/longhorn-uninstall -n longhorn-system -w
-# before continuing we need to wait for success of above job, figure out how to do that in ansible
-- name: wait for uninstall to complete
+- name: wait for longhorn-uninstall job to complete
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
     namespace: longhorn-system
     name: longhorn-uninstall
-    kind: job
-    wait: yes
-    wait_condition:
-      type: Complete
-      status: "True"
-  register: api_status
+    kind: Job
+    api_version: batch/v1
+  register: _longhorn_uninstall_job
+  retries: 30
+  delay: 10
+  until: >
+    _longhorn_uninstall_job.resources | length > 0 and
+    (_longhorn_uninstall_job.resources[0].status.conditions | default([]) |
+     selectattr('type', 'equalto', 'Complete') |
+     selectattr('status', 'equalto', 'True') | list | length > 0)
   ignore_errors: true
-
-- debug:
-    msg: "{{api_status}}"
-  ignore_errors: true
-
-# the above doesn't work for job resources, so until that gets figured out just
-# wait a bit before continuing
-#
-# Failed to find API for resource with apiVersion "v1" and kind "job"
-
-- ansible.builtin.wait_for:
-    timeout: 120
-  become: false
-  delegate_to: localhost
 
 - name: remove remaining references
   kubernetes.core.k8s:
