@@ -60,20 +60,39 @@
     mode: 0755
     owner: root
 
-- name: set bind address
+- name: parse bind CIDRs
   set_fact:
-    _bind_address: "{{hostvars[inventory_hostname]['ansible_' + __iface].ipv4.address}}"
+    _bind_cidrs: "{{ _k3s_cfg.bind_cidr.split(',') | map('trim') | list }}"
+    _bind_addresses: []
+  when: _k3s_cfg.bind_cidr is defined
+
+- name: find IPv4 bind addresses
+  set_fact:
+    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv4_addresses | ipaddr(__cidr) | list)[:1] }}"
   loop_control:
-    loop_var: __iface
-  with_items: "{{hostvars[inventory_hostname]['ansible_interfaces']}}"
+    loop_var: __cidr
+  with_items: "{{ _bind_cidrs | default([]) | ipv4 | list }}"
+
+- name: find IPv6 bind addresses
+  set_fact:
+    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv6_addresses | ipaddr(__cidr) | list)[:1] }}"
+  loop_control:
+    loop_var: __cidr
+  with_items: "{{ _bind_cidrs | default([]) | ipv6 | list }}"
+
+- name: fail if bind_cidr addresses are not all bound
+  ansible.builtin.fail:
+    msg: >-
+      bind_cidr '{{ _k3s_cfg.bind_cidr }}' not fully bound on {{ inventory_hostname }}:
+      found {{ _bind_addresses | length }} address(es) for {{ _bind_cidrs | length }} CIDR(s)
   when: >
-    _k3s_cfg.bind_cidr is defined and
-    _k3s_cfg.bind_cidr|ipaddr('network') == hostvars[inventory_hostname]['ansible_' + __iface].ipv4.network|default('N/A')
+    _bind_cidrs is defined and
+    _bind_addresses | length != _bind_cidrs | length
 
 - name: add bind address to bind args
   set_fact:
-    _k3s_bind_args: " {{_k3s_bind_args}} -i {{_bind_address}} --bind-address={{_bind_address}}"
-  when: _bind_address is defined
+    _k3s_bind_args: " {{_k3s_bind_args}} -i {{_bind_addresses | join(',')}} --bind-address={{_bind_addresses | ipv4 | first | default(_bind_addresses | first)}}"
+  when: _bind_addresses is defined and _bind_addresses | length > 0
 
 - name: add service cidr to bind args
   set_fact:
