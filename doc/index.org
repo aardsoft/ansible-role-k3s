@@ -54,6 +54,13 @@ Check if Kured is running on all nodes:
 kubectl get pods -n kube-system -l app.kubernetes.io/name=kured -o wide
 #+END_SRC
 
+Check Kured configuration, either by helm or via the args of the current running instance:
+
+#+BEGIN_SRC
+helm get values kured -n kube-system
+kubectl get daemonset kured -n kube-system -o jsonpath='{.spec.template.spec.containers[0].args}' | tr  ',' '\n'
+#+END_SRC
+
 Follow Kured logs:
 
 #+BEGIN_SRC shell
