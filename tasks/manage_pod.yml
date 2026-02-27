@@ -9,7 +9,6 @@
     _pod_networks: "{{_pod.value.network|default({})}}"
     _pod_labels: "{{(_pod.value.k3s|default({})).labels|default({})}}"
     _pod_volumes: "{{(_pod.value.pod|default({})).volumes|default([])}}"
-    # TODO, actually do something with that
     _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
     _pod_tolerations: "{{(_pod.value.pod|default({})).tolerations|default([])}}"
     _pod_configmaps: "{{(_pod.value.pod|default({})).configmaps|default([])}}"
@@ -62,18 +61,17 @@
     label: "{{_pvc.name}}"
   when: _pvc.persistentVolumeClaim is defined
 
-- name: push deployment template for debug
+- name: push workload template for debug
   become: false
   connection: local
   local_action:
     module: ansible.builtin.template
     mode: 0600
     src: pod-deployment.yml.j2
-    dest: "{{_k3s_debug_path}}/{{_pod_name}}-deployment.yaml"
+    dest: "{{_k3s_debug_path}}/{{_pod_name}}-{{_pod_workload_type | lower}}.yaml"
   when: _k3s_debug_path is defined
 
-# TODO, we also should support daemonset
-- name: deploy pod as Deployment
+- name: deploy workload
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
