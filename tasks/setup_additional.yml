@@ -1,5 +1,11 @@
-- debug:
-    msg: "extra: {{_k3s_args}}"
+- name: record k3s install args (join)
+  ansible.builtin.copy:
+    content: |
+      K3S_URL='https://{{_k3s_cfg.first_server}}:6443'
+      INSTALL_K3S_EXEC='{{_k3s_args}}'
+    dest: /var/log/k3s-install-args
+    mode: '0600'
+    owner: root
 
 - name: run k3s installer (join)
   ansible.builtin.shell: "{{_k3s_installer}}"

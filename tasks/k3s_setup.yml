@@ -68,17 +68,17 @@
 
 - name: find IPv4 bind addresses
   set_fact:
-    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv4_addresses | ipaddr(__cidr) | list)[:1] }}"
+    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv4_addresses | ansible.utils.ipaddr(__cidr) | list)[:1] }}"
   loop_control:
     loop_var: __cidr
-  with_items: "{{ _bind_cidrs | default([]) | ipv4 | list }}"
+  with_items: "{{ _bind_cidrs | default([]) | ansible.utils.ipv4 | list }}"
 
 - name: find IPv6 bind addresses
   set_fact:
-    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv6_addresses | ipaddr(__cidr) | list)[:1] }}"
+    _bind_addresses: "{{ _bind_addresses + (ansible_all_ipv6_addresses | ansible.utils.ipaddr(__cidr) | list)[:1] }}"
   loop_control:
     loop_var: __cidr
-  with_items: "{{ _bind_cidrs | default([]) | ipv6 | list }}"
+  with_items: "{{ _bind_cidrs | default([]) | ansible.utils.ipv6 | list }}"
 
 - name: fail if bind_cidr addresses are not all bound
   ansible.builtin.fail:
@@ -91,7 +91,7 @@
 
 - name: add bind address to bind args
   set_fact:
-    _k3s_bind_args: " {{_k3s_bind_args}} -i {{_bind_addresses | join(',')}} --bind-address={{_bind_addresses | ipv4 | first | default(_bind_addresses | first)}}"
+    _k3s_bind_args: " {{_k3s_bind_args}} --node-ip={{_bind_addresses | join(',')}} --bind-address={{_bind_addresses | ipv4 | first | default(_bind_addresses | first)}}"
   when: _bind_addresses is defined and _bind_addresses | length > 0
 
 - name: add service cidr to bind args

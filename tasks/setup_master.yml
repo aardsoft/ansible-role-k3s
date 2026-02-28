@@ -1,8 +1,15 @@
 # we probably should add a variable to block new deployments if the key should be there
+- name: record k3s install args (master)
+  ansible.builtin.copy:
+    content: "INSTALL_K3S_EXEC='{{_k3s_args}}'\n"
+    dest: /var/log/k3s-install-args
+    mode: '0600'
+    owner: root
+
 - name: run k3s installer (master)
   ansible.builtin.shell: "{{_k3s_installer}}"
   environment:
-    INSTALL_K3S_EXEC: "server {{_k3s_args}}"
+    INSTALL_K3S_EXEC: "{{_k3s_args}}"
   register: _master_install_status
 
 - name: Reboot transactional system
