@@ -1,0 +1,57 @@
+# Manages a single file in /var/lib/rancher/k3s/server/manifests/.
+# The k3s addon controller applies all files in that directory via kubectl apply,
+# in alphabetical order.
+#
+# Called with _manifest loop var from manage_server_manifests.yml:
+#   key:   relative path under /var/lib/rancher/k3s/server/manifests/
+#   value:
+#     state:    present (default) or absent
+#     template: template name under k3s/templates/server-manifests/ (Jinja2 processed)
+#     file:     filename under k3s/files/server-manifests/ (copied verbatim)
+#     content:  inline YAML string (written directly)
+
+- name: ensure server manifest subdirectory exists
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key | dirname}}"
+    state: directory
+    mode: '0755'
+    owner: root
+  when: >
+    _manifest.value.state | default('present') == 'present' and
+    (_manifest.key | dirname) != ''
+
+- name: apply server manifest from template
+  ansible.builtin.template:
+    src: "server-manifests/{{_manifest.value.template}}"
+    dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
+    mode: '0644'
+    owner: root
+  when: >
+    _manifest.value.state | default('present') == 'present' and
+    _manifest.value.template is defined
+
+- name: apply server manifest from static file
+  ansible.builtin.copy:
+    src: "server-manifests/{{_manifest.value.file}}"
+    dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
+    mode: '0644'
+    owner: root
+  when: >
+    _manifest.value.state | default('present') == 'present' and
+    _manifest.value.file is defined
+
+- name: apply server manifest from inline content
+  ansible.builtin.copy:
+    content: "{{_manifest.value.content}}"
+    dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
+    mode: '0644'
+    owner: root
+  when: >
+    _manifest.value.state | default('present') == 'present' and
+    _manifest.value.content is defined
+
+- name: remove server manifest
+  ansible.builtin.file:
+    path: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
+    state: absent
+  when: _manifest.value.state | default('present') == 'absent'

@@ -262,6 +262,61 @@ How long to wait for a node drain before giving up. Defaults to =0= (unlimited).
 
 Restrict reboots to a maintenance window. Days are lowercase three-letter abbreviations (=mon=, =tue=, etc.). Times are 24h format. When unset, reboots are permitted at any time.
 
+** Manifest overrides
+
+The =server_manifests= key manages files placed in =/var/lib/rancher/k3s/server/manifests/=. The k3s addon controller monitors that directory and applies all files via =kubectl apply= in alphabetical order. This covers the full range of things k3s manages through that path: plain Kubernetes manifests, =HelmChart= resources, and =HelmChartConfig= resources for customising packaged Helm components such as Traefik (see [[https://docs.k3s.io/add-ons/helm#customizing-packaged-components-with-helmchartconfig][k3s docs: customizing packaged components]]).
+
+#+BEGIN_QUOTE
+*Warning:* Stick to things the k3s documentation explicitly supports via this directory — primarily =HelmChartConfig= for packaged Helm components. Overriding plain manifests (non-Helm built-ins such as metrics-server) by placing a file that sorts alphabetically after the built-in one is technically possible but fragile: k3s may change the upstream manifest at any upgrade, the ordering trick is undocumented behaviour, and diagnosing failures is painful because the addon controller gives little feedback.
+#+END_QUOTE
+
+#+BEGIN_SRC yaml
+k3s:
+  server_manifests:
+    traefik-config.yaml:
+      content: |
+        apiVersion: helm.cattle.io/v1
+        kind: HelmChartConfig
+        metadata:
+          name: traefik
+          namespace: kube-system
+        spec:
+          valuesContent: |-
+            globalArguments: []
+    some-static-manifest.yaml:
+      file: my-override.yaml
+    old-manifest.yaml:
+      state: absent
+#+END_SRC
+
+Each key is a path relative to =/var/lib/rancher/k3s/server/manifests/=. Subdirectory components are created automatically. The value supports the following keys:
+
+- =state= =present= (default) or =absent=. When =absent=, the file is deleted.
+- =template= Template name under =k3s/templates/server-manifests/= (Jinja2-processed). The role ships =metrics-server-deployment.j2=.
+- =file= Filename under =k3s/files/server-manifests/= (copied verbatim, no templating).
+- =content= Inline YAML string written directly to the file.
+
+Exactly one of =template=, =file=, or =content= should be set when =state= is =present=.
+
+*** Built-in Traefik ansible label
+
+The role ships a template that adds a =managed-by-ansible: "true"= pod label to Traefik via =HelmChartConfig=. It is intentionally a no-op config change, useful for verifying that the =server_manifests= mechanism and =HelmChartConfig= delivery work correctly before attempting real Traefik configuration.
+
+#+BEGIN_SRC yaml
+k3s:
+  server_manifests:
+    traefik-ansible.yaml:
+      template: traefik-ansible-label.j2
+#+END_SRC
+
+Verify with:
+
+#+BEGIN_SRC sh
+kubectl get pods -n kube-system -l app.kubernetes.io/name=traefik --show-labels
+#+END_SRC
+
+The =managed-by-ansible= label should appear on the Traefik pod. Remove it by setting =state: absent= on the entry.
+
 ** deployments
 
 The =deployments= key under the cluster config allows deploying additional components into the cluster using task files from an external role. The default role is =k3s-deployments= (see [[https://github.com/aardsoft/ansible-role-k3s-deployments][k3s-deployments]]).

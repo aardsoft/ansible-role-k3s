@@ -49,6 +49,10 @@
     _k3s_cfg.kured.state is defined and
     _k3s_cfg.kured.state == 'absent'
 
+- name: manage k3s server manifests
+  include_tasks: manage_server_manifests.yml
+  when: _k3s_cfg.server_manifests is defined
+
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"

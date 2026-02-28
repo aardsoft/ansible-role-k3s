@@ -1,0 +1,24 @@
+# Manages files in /var/lib/rancher/k3s/server/manifests/.
+# The k3s addon controller applies all files in that directory via kubectl apply,
+# in alphabetical order.
+#
+# Reads _k3s_cfg.server_manifests: a dict where each key is a relative path under
+# /var/lib/rancher/k3s/server/manifests/ and the value describes the source:
+#   state:    present (default) or absent
+#   template: template name under k3s/templates/server-manifests/ (Jinja2 processed)
+#   file:     filename under k3s/files/server-manifests/ (copied verbatim)
+#   content:  inline YAML string (written directly)
+#
+# Example:
+#   server_manifests:
+#     metrics-server/z-metrics-server-deployment.yaml:
+#       template: metrics-server-deployment.j2
+#     some-manifest.yaml:
+#       state: absent
+
+- name: manage k3s server manifests
+  include_tasks: manage_server_manifest.yml
+  with_dict: "{{_k3s_cfg.server_manifests | default({})}}"
+  loop_control:
+    loop_var: _manifest
+    label: "{{_manifest.key}}"
