@@ -39,3 +39,50 @@
   when: >
     _master_install_status is changed and
     _k3s_token_slurp.failed == true
+
+- name: verify k3s service network configuration
+  block:
+    - name: get kubernetes service details
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        name: kube-dns
+        namespace: kube-system
+      register: _k8s_svc
+      until: _k8s_svc.resources | length > 0
+      retries: 20
+      delay: 5
+
+    - name: get kubernetes service CIDR
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: ServiceCIDR
+      register: _service_cidr
+
+    - name: Parse networking state
+      set_fact:
+        # intended state determined from the configuration
+        _expected_count: "{{ _k3s_cfg.service_cidr.split(',') | length }}"
+        _expected_policy: "{{ 'RequireDualStack' if (_k3s_cfg.service_cidr.split(',') | length > 1) else 'SingleStack' }}"
+        _expected_cidrs: "{{ _k3s_cfg.service_cidr.split(',') | map('trim') | list }}"
+        # actual state from the API
+        _actual_families: "{{ _k8s_svc.resources[0].spec.ipFamilies }}"
+        _actual_policy: "{{ _k8s_svc.resources[0].spec.ipFamilyPolicy }}"
+        _actual_cidrs: "{{ _service_cidr.resources[0].spec.cidrs | default([]) }}"
+
+    - name: validate networking stack matches configuration
+      fail:
+        msg: >-
+          Networking stack mismatch!
+          Configured CIDR: {{ _k3s_cfg.service_cidr }} (Count: {{ _expected_count }})
+          Actual Families: {{ _actual_families }}
+          Actual Policy: {{ _actual_policy }}
+          Expected Policy: {{ _expected_policy }}
+          Expected CIDRs: {{ _expected_cidrs }}
+          Actual CIDRs: {{ _actual_cidrs }}
+      when: >
+        (_actual_families | length != _expected_count | int) or
+        (_actual_policy != _expected_policy) or
+        (_expected_cidrs | difference(_actual_cidrs) | length > 0) or
+        (_actual_cidrs | difference(_expected_cidrs) | length > 0)
+  when: _k3s_cfg.service_cidr is defined
