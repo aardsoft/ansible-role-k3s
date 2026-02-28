@@ -80,6 +80,14 @@
     loop_var: __cidr
   with_items: "{{ _bind_cidrs | default([]) | ansible.utils.ipv6 | list }}"
 
+- name: reorder bind addresses for IPv6 preference
+  set_fact:
+    _bind_addresses: "{{ (_bind_addresses | ansible.utils.ipv6 | list) + (_bind_addresses | ansible.utils.ipv4 | list) }}"
+  when: >
+    _bind_addresses is defined and
+    _bind_addresses | length > 0 and
+    _k3s_cfg.ip_preference | default('ipv4') == 'ipv6'
+
 - name: fail if bind_cidr addresses are not all bound
   ansible.builtin.fail:
     msg: >-
@@ -94,15 +102,35 @@
     _k3s_bind_args: " {{_k3s_bind_args}} --node-ip={{_bind_addresses | join(',')}} --bind-address={{_bind_addresses | ipv4 | first | default(_bind_addresses | first)}}"
   when: _bind_addresses is defined and _bind_addresses | length > 0
 
+- name: order service CIDR by IP preference
+  set_fact:
+    _k3s_service_cidr: >-
+      {{ ((s | ansible.utils.ipv6 | list) + (s | ansible.utils.ipv4 | list)) | join(',')
+         if _k3s_cfg.ip_preference | default('ipv4') == 'ipv6'
+         else ((s | ansible.utils.ipv4 | list) + (s | ansible.utils.ipv6 | list)) | join(',') }}
+  vars:
+    s: "{{ _k3s_cfg.service_cidr.split(',') | map('trim') | list }}"
+  when: _k3s_cfg.service_cidr is defined
+
+- name: order cluster CIDR by IP preference
+  set_fact:
+    _k3s_cluster_cidr: >-
+      {{ ((s | ansible.utils.ipv6 | list) + (s | ansible.utils.ipv4 | list)) | join(',')
+         if _k3s_cfg.ip_preference | default('ipv4') == 'ipv6'
+         else ((s | ansible.utils.ipv4 | list) + (s | ansible.utils.ipv6 | list)) | join(',') }}
+  vars:
+    s: "{{ _k3s_cfg.cluster_cidr.split(',') | map('trim') | list }}"
+  when: _k3s_cfg.cluster_cidr is defined
+
 - name: add service cidr to bind args
   set_fact:
-    _k3s_bind_args: " {{_k3s_bind_args}} --service-cidr={{_k3s_cfg.service_cidr}}"
-  when: _k3s_cfg.service_cidr is defined
+    _k3s_bind_args: " {{_k3s_bind_args}} --service-cidr={{_k3s_service_cidr}}"
+  when: _k3s_service_cidr is defined
 
 - name: add cluster cidr to bind args
   set_fact:
-    _k3s_bind_args: " {{_k3s_bind_args}} --cluster-cidr={{_k3s_cfg.cluster_cidr}}"
-  when: _k3s_cfg.cluster_cidr is defined
+    _k3s_bind_args: " {{_k3s_bind_args}} --cluster-cidr={{_k3s_cluster_cidr}}"
+  when: _k3s_cluster_cidr is defined
 
 - set_fact:
     _k3s_args: "{{k3s_role}} {{_k3s_bind_args}} {{_k3s_cfg.args|default('')}}"
