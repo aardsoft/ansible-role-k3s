@@ -50,7 +50,23 @@
     _manifest.value.state | default('present') == 'present' and
     _manifest.value.content is defined
 
-- name: remove server manifest
+- name: check if server manifest exists before removal
+  ansible.builtin.stat:
+    path: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
+  register: _manifest_stat
+  when: _manifest.value.state | default('present') == 'absent'
+
+- name: delete k8s resources defined in server manifest
+  ansible.builtin.command:
+    cmd: >
+      kubectl --kubeconfig {{_k3s_kubecfg}}
+      delete -f /var/lib/rancher/k3s/server/manifests/{{_manifest.key}}
+      --ignore-not-found
+  when:
+    - _manifest.value.state | default('present') == 'absent'
+    - _manifest_stat.stat.exists | default(false)
+
+- name: remove server manifest file
   ansible.builtin.file:
     path: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
     state: absent
