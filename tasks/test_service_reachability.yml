@@ -1,0 +1,194 @@
+- name: get cluster nodes
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Node
+  register: _cluster_nodes
+
+- name: get kubernetes service ClusterIPs
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Service
+    name: kubernetes
+    namespace: default
+  register: _k8s_kubernetes_svc_info
+  until: _k8s_kubernetes_svc_info.resources | length > 0
+  retries: 10
+  delay: 5
+
+- name: get kubernetes service EndpointSlices
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: EndpointSlice
+    namespace: default
+    label_selectors:
+      - "kubernetes.io/service-name=kubernetes"
+  register: _k8s_kubernetes_eps
+
+- name: set service reachability test parameters
+  set_fact:
+    _test_nodes: "{{ _cluster_nodes.resources | map(attribute='metadata.name') | list }}"
+    _svc_all_ips: "{{ _k8s_kubernetes_svc_info.resources[0].spec.clusterIPs }}"
+    _eps_families: "{{ _k8s_kubernetes_eps.resources | map(attribute='addressType') | list }}"
+
+- name: derive testable ClusterIPs from EndpointSlice address families
+  set_fact:
+    _svc_test_ips: >-
+      {{ ((_svc_all_ips | ansible.utils.ipv4 | list) if 'IPv4' in _eps_families else [])
+         + ((_svc_all_ips | ansible.utils.ipv6 | list) if 'IPv6' in _eps_families else []) }}
+
+- name: test service IP reachability from each node
+  block:
+    - name: create per-node service IP test pods
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "svctest-{{ item }}"
+            namespace: kube-system
+          spec:
+            nodeName: "{{ item }}"
+            restartPolicy: Never
+            containers:
+              - name: test
+                image: busybox
+                command:
+                  - sh
+                  - -c
+                  - >-
+                    {{ _svc_test_ips
+                       | map('regex_replace', '^(.*)$', 'wget -T5 -qO- --no-check-certificate https://\1/version 2>&1')
+                       | join('; ') }}; true
+      loop: "{{ _test_nodes }}"
+
+    - name: wait for test pods to complete
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Pod
+        name: "svctest-{{ item }}"
+        namespace: kube-system
+      register: _svc_pod_status
+      until: >
+        _svc_pod_status.resources | length > 0 and
+        _svc_pod_status.resources[0].status.phase in ['Succeeded', 'Failed']
+      retries: 20
+      delay: 5
+      loop: "{{ _test_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: collect test pod logs
+      kubernetes.core.k8s_log:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        name: "svctest-{{ item }}"
+        namespace: kube-system
+      register: _svc_pod_logs
+      loop: "{{ _test_nodes }}"
+      loop_control:
+        label: "{{ item }}"
+
+    - name: get kubernetes service ClusterIPs for diagnosis
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        name: kubernetes
+        namespace: default
+      register: _diag_kubernetes_svc
+      when: >
+        _svc_pod_logs.results
+        | selectattr('log', 'search', 'timed out|refused|can.t connect')
+        | list | length > 0
+
+    - name: collect IPv6 routing diagnostics
+      ansible.builtin.shell: |
+        echo "=== node podCIDRs ==="
+        /usr/local/bin/kubectl --kubeconfig {{ _k3s_kubecfg }} get nodes \
+          -o custom-columns='NODE:.metadata.name,POD_CIDRS:.spec.podCIDRs' --no-headers
+        echo "=== kubernetes service endpoints ==="
+        /usr/local/bin/kubectl --kubeconfig {{ _k3s_kubecfg }} get endpoints kubernetes -n default -o wide
+        echo "=== kubernetes endpointslices ==="
+        /usr/local/bin/kubectl --kubeconfig {{ _k3s_kubecfg }} get endpointslices \
+          -n default -l kubernetes.io/service-name=kubernetes -o wide
+        echo "=== ip6tables KUBE-SERVICES ==="
+        ip6tables -t nat -L KUBE-SERVICES -n 2>/dev/null \
+          || nft list chain ip6 nat KUBE-SERVICES 2>/dev/null \
+          || echo "(no ip6 nat KUBE-SERVICES chain found)"
+        echo "=== flannel interfaces ==="
+        ip -6 addr show flannel.1 2>/dev/null || echo "(flannel.1: no IPv6)"
+        ip -6 addr show flannel-v6.1 2>/dev/null || echo "(flannel-v6.1: not found)"
+        echo "=== IPv6 routes ==="
+        ip -6 route show | grep -E 'flannel|fd42' || echo "(no flannel/fd42 IPv6 routes)"
+      register: _ipv6_routing_diag
+      changed_when: false
+      failed_when: false
+      when: >
+        _svc_pod_logs.results
+        | selectattr('log', 'search', 'timed out|refused|can.t connect')
+        | list | length > 0
+
+    - name: show IPv6 routing diagnostics
+      debug:
+        msg: "{{ item }}"
+      loop: "{{ _ipv6_routing_diag.stdout_lines | default([]) }}"
+      when: _ipv6_routing_diag is defined and _ipv6_routing_diag.stdout_lines | default([]) | length > 0
+
+    - name: diagnose service IP reachability failures
+      debug:
+        var: _node_diagnosis
+      vars:
+        _clusterips: "{{ _diag_kubernetes_svc.resources[0].spec.clusterIPs | default(['unknown']) }}"
+        _ok: "{{ item.log_lines | select('search', '401') | list | length }}"
+        _timeout: "{{ item.log_lines | select('search', 'timed out') | list | length }}"
+        _refused: "{{ item.log_lines | select('search', 'refused|can.t connect') | list | length }}"
+        _node_diagnosis:
+          node: "{{ item.item }}"
+          per_ip: >-
+            {{ dict(_svc_test_ips | zip(item.log_lines[:(_svc_test_ips | length)]
+               | map('regex_replace', '^.*401.*$', 'OK (401)')
+               | map('regex_replace', '^.*timed out.*$', 'TIMEOUT')
+               | map('regex_replace', '^.*(refused|can.t connect).*$', 'REFUSED')
+               | list)) }}
+          kubernetes_cluster_ips: "{{ _clusterips }}"
+          diagnosis: >-
+            {% if _ok | int == 0 and _refused | int > 0 %}
+            Connection refused — DNAT working but API server not listening on that address (check endpoints and --bind-address)
+            {% elif _ok | int == 0 %}
+            all IPs unreachable — FORWARD chain issue (KUBE-ROUTER-FORWARD)
+            {% elif (_timeout | int > 0 or _refused | int > 0) and _clusterips | length < _svc_test_ips | length %}
+            IPv6 ClusterIP missing — cluster initialised without dual-stack service CIDR
+            {% elif _refused | int > 0 %}
+            IPv6 connection refused — DNAT working but API server not listening on IPv6 endpoint (check endpoints)
+            {% elif _timeout | int > 0 %}
+            IPv6 ClusterIP exists but unreachable — check pod IPv6 addresses, ip6tables rules, flannel.1 IPv6
+            {% endif %}
+      loop: "{{ _svc_pod_logs.results }}"
+      when: (item.log | regex_findall('401') | length) < (_svc_test_ips | length)
+      loop_control:
+        label: "{{ item.item }}"
+
+    - name: verify service IP reachability from each node
+      fail:
+        msg: >-
+          Service IP unreachable from pod on {{ item.item }}.
+          Expected 401 for each of {{ _svc_test_ips }} ({{ _svc_test_ips | length }} total).
+          Got {{ item.log | regex_findall('401') | length }} 401 response(s).
+          Pod output: {{ item.log }}
+      loop: "{{ _svc_pod_logs.results }}"
+      when: (item.log | regex_findall('401') | length) < (_svc_test_ips | length)
+      loop_control:
+        label: "{{ item.item }}"
+
+  always:
+    - name: remove service IP test pods
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: "svctest-{{ item }}"
+            namespace: kube-system
+      loop: "{{ _test_nodes }}"

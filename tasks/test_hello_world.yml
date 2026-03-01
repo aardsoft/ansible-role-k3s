@@ -3,6 +3,8 @@
     url: "http://{{ansible_host}}/check"
     method: GET
     return_content: true
+    headers:
+      Host: "hw-{{k3s_rand | lower}}.test"
   register: k3s_uri_test
   retries: 3
   delay: 30

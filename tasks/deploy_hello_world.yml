@@ -10,6 +10,20 @@
     name: "{{k3s_test_namespace}}"
   when: k3s_test_namespace != "default"
 
+- name: clean up any leftover hello world resources
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    kind: "{{item.kind}}"
+    name: "{{item.name}}"
+    namespace: "{{k3s_test_namespace}}"
+  loop:
+    - {kind: Deployment, name: hello-world-nginx}
+    - {kind: Ingress,    name: hello-world}
+    - {kind: Service,    name: hello-world}
+    - {kind: ConfigMap,  name: hello-world}
+  ignore_errors: true
+
 - name: create 'hello world' configmap (ns "{{k3s_test_namespace}}")
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -44,7 +58,8 @@
           kubernetes.io/ingress.class: "traefik"
       spec:
         rules:
-        - http:
+        - host: "hw-{{k3s_rand | lower}}.test"
+          http:
             paths:
             - path: /
               pathType: Prefix
