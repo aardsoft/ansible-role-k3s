@@ -7,6 +7,7 @@
     _k3s_token: ""
     _k3s_token_passdb: ""
     _k3s_bind_args: ""
+    _k3s_flannel_iface: ""
     _node_uninitialized: false
 
 - set_fact:
@@ -96,6 +97,27 @@
   when: >
     _bind_cidrs is defined and
     _bind_addresses | length != _bind_cidrs | length
+
+- name: find flannel interface from bind addresses
+  set_fact:
+    _k3s_flannel_iface: "{{ item }}"
+  loop: "{{ ansible_interfaces }}"
+  vars:
+    _iface: "{{ hostvars[inventory_hostname]['ansible_' + item | replace('.', '_')] | default({}) }}"
+    _iface_addrs: >-
+      {{ ([_iface.ipv4.address | default('')] +
+          (_iface.ipv4_secondaries | default([]) | map(attribute='address') | list) +
+          (_iface.ipv6 | default([]) | map(attribute='address') | list))
+         | select('ne', '') | list }}
+  when: >
+    _bind_addresses is defined and
+    _bind_addresses | length > 0 and
+    _iface_addrs | intersect(_bind_addresses) | length > 0
+
+- name: add flannel interface to bind args
+  set_fact:
+    _k3s_bind_args: "{{_k3s_bind_args}} --flannel-iface={{_k3s_flannel_iface}}"
+  when: _k3s_flannel_iface != ""
 
 - name: add bind address to bind args
   set_fact:
