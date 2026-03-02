@@ -40,6 +40,16 @@
     k3s_role|default('agent') == 'agent' and
     ansible_facts['services']['k3s-agent.service']['status'] | default('not-found') != 'enabled'
 
+- name: rotate journals before install
+  ansible.builtin.command: journalctl --rotate
+  changed_when: false
+  when: _k3s_cfg.vacuum_logs | default(false) and _node_uninitialized
+
+- name: vacuum journals before install
+  ansible.builtin.command: journalctl --vacuum-time=1s
+  changed_when: false
+  when: _k3s_cfg.vacuum_logs | default(false) and _node_uninitialized
+
 - name: copy k3s installer
   ansible.builtin.copy:
     src: k3s_installer.sh
