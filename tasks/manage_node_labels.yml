@@ -1,0 +1,24 @@
+# Applies k3s_node_labels to k3s nodes from the first server.
+# Iterates all inventory hosts that belong to this cluster and have
+# k3s_node_labels defined.
+#
+# k3s_node_labels syntax (host_vars or group_vars):
+#   key: value             # string -> set label to value
+#   key:
+#     value: val           # dict with value [+ optional state: present]
+#   key:
+#     state: absent        # null out label (removes it from the node)
+#
+# A missing state field is treated as present.
+# Labels not mentioned in k3s_node_labels are not touched.
+
+- name: apply node labels for cluster hosts
+  include_tasks: manage_node_labels_for_host.yml
+  loop: "{{groups['all']}}"
+  loop_control:
+    loop_var: _label_host
+    label: "{{_label_host}}"
+  when: >
+    hostvars[_label_host].k3s_node_labels is defined and
+    hostvars[_label_host].k3s is defined and
+    hostvars[_label_host].k3s.cluster | default('') == inventory_hostname

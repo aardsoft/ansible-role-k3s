@@ -378,6 +378,27 @@ k3s_role: server
 
 If =k3s_cluster= and =k3s_clusters= are both defined and =k3s_clusters[k3s_cluster]= exists, that entry is used as the cluster config. Otherwise the role falls back to a top-level =k3s:= variable.
 
+*** =k3s_node_labels=
+A map of Kubernetes label key -> value to apply to this node. Labels are applied by the first server during each ansible run using a strategic merge patch, so they are idempotent. Labels not mentioned in =k3s_node_labels= are left untouched.
+
+Each entry supports two forms:
+
+- Plain string value -> label set to that value (present)
+- Dict with =value= [+ optional =state: present=] -> label set to =value=
+- Dict with =state: absent= -> label nulled out (removed from the node)
+
+#+BEGIN_SRC yaml
+# host_vars/storage2.yml
+k3s_node_labels:
+  node-role: storage          # string: set label
+  disk-type:
+    value: nvme               # dict with value: set label
+  retired-label:
+    state: absent             # remove label from node
+#+END_SRC
+
+Labels applied via =k3s_node_labels= can be referenced in =k3s-pod= definitions using =k3s.node_selector= to constrain which node a pod is scheduled on.
+
 *** =k3s_passdb=
 The password store backend to use for secret lookups (e.g. the node token). Defaults to the value of the =passdb= variable if set, otherwise =passwordstore=. Set this to use an alternative Ansible lookup plugin as your secret backend.
 
@@ -517,6 +538,7 @@ pod-name:
 - =state= :: When set to =absent=, the workload, its Services, PVCs, ConfigMaps, and Secrets are all removed. Resources are removed in order: workload -> services -> PVCs -> ConfigMaps -> Secrets.
 - =default_container= The container to target when ansible connects via sshkubectl. Automatically set for single-container pods; must be explicit for multi-container pods if you want =ansible pod-name= to target a specific container.
 - =labels= Extra labels added to the pod template metadata. Useful for pod selectors or Prometheus scraping.
+- =node_selector= Map of label key -> value used as a Kubernetes =nodeSelector=. The pod is only scheduled on nodes that carry all specified labels. Omit to allow scheduling on any node.
 
 *** =network= options
 

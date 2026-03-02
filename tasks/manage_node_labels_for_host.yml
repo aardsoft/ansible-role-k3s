@@ -1,0 +1,39 @@
+# Called from manage_node_labels.yml with _label_host as the loop variable.
+# Builds a strategic-merge-patch labels dict and applies it to the Node object.
+# Present labels get their value; absent labels get null (which removes them).
+
+- name: "init label patch for {{_label_host}}"
+  set_fact:
+    _label_patch: {}
+
+- name: "set string-valued labels for {{_label_host}}"
+  set_fact:
+    _label_patch: "{{_label_patch | combine({item.key: item.value})}}"
+  loop: "{{hostvars[_label_host].k3s_node_labels | dict2items | selectattr('value', 'string') | list}}"
+  loop_control:
+    label: "{{item.key}}"
+
+- name: "set dict-valued present labels for {{_label_host}}"
+  set_fact:
+    _label_patch: "{{_label_patch | combine({item.key: item.value.value})}}"
+  loop: "{{hostvars[_label_host].k3s_node_labels | dict2items | rejectattr('value', 'string') | rejectattr('value.state', 'equalto', 'absent') | list}}"
+  loop_control:
+    label: "{{item.key}}"
+
+- name: "null out absent labels for {{_label_host}}"
+  set_fact:
+    _label_patch: "{{_label_patch | combine({item.key: none})}}"
+  loop: "{{hostvars[_label_host].k3s_node_labels | dict2items | rejectattr('value', 'string') | selectattr('value.state', 'equalto', 'absent') | list}}"
+  loop_control:
+    label: "{{item.key}}"
+
+- name: "patch node labels for {{_label_host}}"
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    kind: Node
+    name: "{{_label_host}}"
+    definition:
+      metadata:
+        labels: "{{_label_patch}}"
+  when: _label_patch | length > 0

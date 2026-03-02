@@ -11,6 +11,7 @@
     _pod_volumes: "{{(_pod.value.pod|default({})).volumes|default([])}}"
     _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
     _pod_tolerations: "{{(_pod.value.pod|default({})).tolerations|default([])}}"
+    _pod_node_selector: "{{(_pod.value.k3s|default({})).node_selector|default({})}}"
     _pod_configmaps: "{{(_pod.value.pod|default({})).configmaps|default([])}}"
     _pod_secrets: "{{(_pod.value.pod|default({})).secrets|default([])}}"
 

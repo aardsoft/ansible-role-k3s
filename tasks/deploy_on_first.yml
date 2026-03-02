@@ -53,6 +53,9 @@
   include_tasks: manage_server_manifests.yml
   when: _k3s_cfg.server_manifests is defined
 
+- name: manage node labels
+  include_tasks: manage_node_labels.yml
+
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"
