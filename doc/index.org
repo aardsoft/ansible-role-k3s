@@ -136,6 +136,9 @@ It is recommended to set this for security reasons — without it k3s management
 *** =bind_args=
 Arbitrary bind arguments to pass to =k3s=.
 
+*** =channel=
+The channel to use for =k3s= releases. When not specified =stable= is used, though =latest= often is also safe enough.
+
 *** =cluster_cidr=
 Pass =--cluster-cidr= to =k3s= to set the pod IPs. Default is =10.42.0.0/16=.
 
@@ -145,6 +148,9 @@ A list of task file names to load and run at the end of the role, run against al
  There also is a top-level variable =k3s_extra_tasks= outside of the k3s dict that works identically but is set at the host or group level independently of any cluster config. Both lists are processed if defined; cluster config tasks run first.
 
 The included tasks run unconditionally against all hosts in the play — any limiting to specific nodes or roles must be done inside the included task file itself.
+
+*** =ip_preference=
+For dual stack setups, specify which IP address family to prefer. Defaults to =ipv4=, other possible value is =ipv6=. This will sort multi protocol configuration keys, which also eliminates configuration errors due to wrong order specified there.
 
 *** =first_server=
 The address of the first server. Typically this is the first server where k3s was installed, but can be any of the master servers.
