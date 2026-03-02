@@ -80,6 +80,14 @@
     _k3s_cfg.test_cluster == true and
     k3s_role|default('agent') == 'server'
 
+- include_tasks: test_service_reachability.yml
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.test_cluster_services is defined and
+    _k3s_cfg.test_cluster_services == true and
+    k3s_role|default('agent') == 'server'
+  run_once: true
+
 - include_tasks: deploy_on_first.yml
   when: >
     _k3s_cfg is defined and

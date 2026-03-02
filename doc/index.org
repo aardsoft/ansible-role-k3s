@@ -174,6 +174,9 @@ Can be set to =true= or =false=. This will create a hello world container, creat
 
 It is recommended to enable this when creating a new cluster, and disabling it after that.
 
+*** =test_cluster_services=
+Can be set to =true= or =false=. This will create test containers to see if the service IPs are reachable from each node. This identifies network issues which would cause interesting behaviour later on, so it is recommended to enable this when creating a new cluster, and disable it after that.
+
 *** =use_config_file=
 Specify initial configuration parameters through =/etc/rancher/k3s/config.yaml= instead of using command line arguments. In some cases this can be more reliable.
 

@@ -89,6 +89,20 @@
       loop_control:
         label: "{{ item }}"
 
+    - name: show service IP reachability results
+      debug:
+        msg: >-
+          {{ item.item }}: {% for ip, status in dict(_svc_test_ips | zip(
+               item.log_lines[:(_svc_test_ips | length)]
+               | map('regex_replace', '^.*401.*$', 'OK')
+               | map('regex_replace', '^.*timed out.*$', 'TIMEOUT')
+               | map('regex_replace', '^.*(refused|can.t connect).*$', 'REFUSED')
+               | list
+             )).items() %}{{ ip }}={{ status }}{% if not loop.last %}, {% endif %}{% endfor %}
+      loop: "{{ _svc_pod_logs.results }}"
+      loop_control:
+        label: "{{ item.item }}"
+
     - name: get kubernetes service ClusterIPs for diagnosis
       kubernetes.core.k8s_info:
         kubeconfig: "{{_k3s_kubecfg}}"
@@ -96,6 +110,27 @@
         name: kubernetes
         namespace: default
       register: _diag_kubernetes_svc
+      when: >
+        _svc_pod_logs.results
+        | selectattr('log', 'search', 'timed out|refused|can.t connect')
+        | list | length > 0
+
+    - name: check flannel public IP alignment with node internal IPs
+      debug:
+        var: _flannel_check
+      vars:
+        _flannel_ip: "{{ item.metadata.annotations['flannel.alpha.coreos.com/public-ip'] | default('N/A') }}"
+        _internal_ips: "{{ (item.metadata.annotations['k3s.io/internal-ip'] | default('')).split(',') | map('trim') | list }}"
+        _flannel_check:
+          node: "{{ item.metadata.name }}"
+          flannel_public_ip: "{{ _flannel_ip }}"
+          internal_ips: "{{ _internal_ips }}"
+          status: >-
+            {{ 'MISMATCH — flannel using wrong interface; set flannel-iface in k3s config'
+               if _flannel_ip not in _internal_ips else 'OK' }}
+      loop: "{{ _cluster_nodes.resources }}"
+      loop_control:
+        label: "{{ item.metadata.name }}"
       when: >
         _svc_pod_logs.results
         | selectattr('log', 'search', 'timed out|refused|can.t connect')
@@ -192,3 +227,4 @@
             name: "svctest-{{ item }}"
             namespace: kube-system
       loop: "{{ _test_nodes }}"
+      ignore_errors: true
