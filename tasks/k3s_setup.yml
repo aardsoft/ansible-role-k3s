@@ -57,12 +57,20 @@
     mode: 0755
     owner: root
 
-- name: create k3s.service.de
+- name: create k3s.service.d
   ansible.builtin.file:
     state: directory
     mode: 0755
     owner: root
     path: /etc/systemd/system/k3s.service.d
+
+- name: create /etc/rancher/k3s
+  ansible.builtin.file:
+    state: directory
+    mode: 0700
+    owner: root
+    path: /etc/rancher/k3s
+  when: _k3s_cfg.use_config_file | default(false)
 
 - name: copy longhorn environment check
   ansible.builtin.copy:
@@ -108,21 +116,60 @@
     _bind_cidrs is defined and
     _bind_addresses | length != _bind_cidrs | length
 
-- name: find flannel interface from bind addresses
-  set_fact:
-    _k3s_flannel_iface: "{{ item }}"
+#- name: Find first interface matching bind addresses (CIDR support)
+#  ansible.builtin.set_fact:
+#    _k3s_flannel_iface: "{{ iface_name }}"
+#  loop: "{{ ansible_interfaces }}"
+#  loop_control:
+#    loop_var: iface_name
+#  vars:
+#    # 1. Safely retrieve the fact object for the current interface
+#    #    Uses regex_replace to handle 'eth0.100' -> 'ansible_eth0_100'
+#    iface_data: "{{ vars['ansible_' + iface_name | regex_replace('[^a-zA-Z0-9]', '_')] | default({}) }}"
+#
+#    # 2. Flatten all possible IPs (v4, v4 secondaries, v6) into one list
+#    current_ips: >-
+#      {{
+#        ([iface_data.ipv4.address] if iface_data.ipv4.address is defined else []) +
+#        (iface_data.ipv4_secondaries | default([]) | map(attribute='address') | list) +
+#        (iface_data.ipv6 | default([]) | map(attribute='address') | list)
+#      }}
+#  when:
+#    - _k3s_flannel_iface is not defined   # Ensures we only keep the FIRST match found
+#    - _bind_addresses is defined
+#    - current_ips | ansible.utils.ipaddr(_bind_addresses) | length > 0
+
+- name: Find first interface matching bind addresses
+  ansible.builtin.set_fact:
+    _k3s_flannel_iface: "{{ iface_name }}"
   loop: "{{ ansible_interfaces }}"
+  loop_control:
+    loop_var: iface_name
+    label: "{{ iface_name }} (IPs: {{ current_ips | join(', ') }})"
   vars:
-    _iface: "{{ hostvars[inventory_hostname]['ansible_' + item | replace('.', '_')] | default({}) }}"
-    _iface_addrs: >-
-      {{ ([_iface.ipv4.address | default('')] +
-          (_iface.ipv4_secondaries | default([]) | map(attribute='address') | list) +
-          (_iface.ipv6 | default([]) | map(attribute='address') | list))
-         | select('ne', '') | list }}
-  when: >
-    _bind_addresses is defined and
-    _bind_addresses | length > 0 and
-    _iface_addrs | intersect(_bind_addresses) | length > 0
+    # Use ansible_facts directly as it's more reliable than the 'ansible_xxx' vars
+    iface_data: "{{ ansible_facts[iface_name] | default({}) }}"
+
+    # Strictly collect valid IP strings only
+    current_ips: >-
+      {{
+        ([iface_data.ipv4.address] if iface_data.ipv4.address is defined else []) +
+        (iface_data.ipv4_secondaries | default([]) | map(attribute='address') | list) +
+        (iface_data.ipv6 | default([]) | map(attribute='address') | list)
+      }}
+  when:
+    - not _k3s_flannel_iface
+    - _bind_addresses is defined
+    # We use 'unique' to clean the list and then check for matches
+    - current_ips | intersect(_bind_addresses) | length > 0
+
+- name: Fail if no matching interface was found
+  ansible.builtin.fail:
+    msg: >-
+      Could not find an interface with an IP belonging to {{ _bind_addresses }}.
+      Check your _bind_addresses list or host facts.
+
+  when: _k3s_flannel_iface == ""
 
 - name: add flannel interface to bind args
   set_fact:
@@ -165,11 +212,31 @@
   when: _k3s_cluster_cidr is defined
 
 - set_fact:
+    _k3s_args: "{{k3s_role}}"
+  when: _k3s_cfg.use_config_file | default(false)
+
+- set_fact:
     _k3s_args: "{{k3s_role}} {{_k3s_bind_args}} {{_k3s_cfg.args|default('')}}"
+  when: not (_k3s_cfg.use_config_file | default(false))
 
 - set_fact:
     _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode={{_k3s_cfg.kubeconfig_mode|default('0600')}}"
-  when: _first_server == true
+  when: _first_server == true and not (_k3s_cfg.use_config_file | default(false))
+
+- name: write k3s config.yaml
+  ansible.builtin.template:
+    src: k3s-config.j2
+    dest: /etc/rancher/k3s/config.yaml
+    mode: "0600"
+    owner: root
+  register: _k3s_config_status
+  when: _k3s_cfg.use_config_file | default(false)
+
+- name: remove k3s service drop-in (config.yaml mode)
+  ansible.builtin.file:
+    path: /etc/systemd/system/k3s.service.d/10-exec.conf
+    state: absent
+  when: _k3s_cfg.use_config_file | default(false)
 
 - name: create k3s service drop-in
   ansible.builtin.template:
@@ -178,13 +245,16 @@
     mode: "0644"
     owner: root
   register: _dropin_status
+  when: not (_k3s_cfg.use_config_file | default(false))
 
 - name: restart k3s
   ansible.builtin.systemd_service:
     name: k3s
     daemon_reload: true
     state: restarted
-  when: _dropin_status is changed
+  when: >
+    (_dropin_status is defined and _dropin_status is changed) or
+    (_k3s_config_status is defined and _k3s_config_status is changed)
   ignore_errors: true
 
 - name: setup master

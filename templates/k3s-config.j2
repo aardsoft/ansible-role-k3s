@@ -1,0 +1,35 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+# {{ ansible_managed }}
+{% if _bind_addresses | default([]) | length > 0 %}
+node-ip:
+{% for addr in _bind_addresses %}
+  - "{{ addr }}"
+{% endfor %}
+bind-address: "{{ _bind_addresses | ansible.utils.ipv4 | first | default(_bind_addresses | first) }}"
+{% endif %}
+{% if _k3s_flannel_iface | default('') != '' %}
+flannel-iface: "{{ _k3s_flannel_iface }}"
+{% endif %}
+{% if _k3s_service_cidr is defined %}
+service-cidr: "{{ _k3s_service_cidr }}"
+{% endif %}
+{% if _k3s_cluster_cidr is defined %}
+cluster-cidr: "{{ _k3s_cluster_cidr }}"
+{% endif %}
+{% if _first_server | default(false) %}
+{% if _k3s_service_cidr is defined and ',' in _k3s_service_cidr %}
+#kube-apiserver-arg:
+#  - "service-cluster-ip-range={{ _k3s_service_cidr }}"
+{% endif %}
+cluster-init: true
+{% else %}
+{% if _k3s_cfg.first_server is defined %}
+server: "https://{{ _k3s_cfg.first_server }}:6443"
+{% endif %}
+{% endif %}
+{% if k3s_role | default('agent') == 'server' %}
+write-kubeconfig-mode: "{{ _k3s_cfg.kubeconfig_mode | default('0600') }}"
+{% endif %}
+{% if _k3s_cfg.server_config is defined %}
+{{ _k3s_cfg.server_config | to_nice_yaml(indent=2) | trim }}
+{% endif %}
