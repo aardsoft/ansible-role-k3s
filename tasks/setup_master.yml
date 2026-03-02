@@ -1,4 +1,7 @@
 # we probably should add a variable to block new deployments if the key should be there
+- set_fact:
+    _k3s_patch_dualstack: "{{ _k3s_cfg.patch_kubernetes_service | default(false) }}"
+
 - name: record k3s install args (master)
   ansible.builtin.copy:
     content: |
@@ -45,9 +48,37 @@
     _master_install_status is changed and
     _k3s_token_slurp.failed == true
 
+
+# This section involves a lot of guess work, as dual stack support is still
+# horrible, and on top of that badly documented.
+#
+# It seems that even on a dual stack cluster the api server only binds to v4
+# (unless no bind address is required, then it'll bind on everything). The
+# kubernetes service also only binds to v4 (which should not be an issue,
+# the control plane should be able to happily run v4 only), while other services
+# like DNS come up in dual stack.
+#
+# It seems to be possible to patch the kubernetes service to dual stack without
+# breaking anything else - but as that's highly experimental it is disabled per
+# default, and not included in the documentation outside of this file. As the
+# rest of the control plane is expected to talk via v4 anyway there's probably
+# no practical use in doing this patching.
+#
+# The checks below are roughly:
+#
+# - if the service CIDR is v4 only, fail if not v4 single stack
+# - if the service CIDR is v6 only, fail if not v6 single stack
+# - if the service CIDR is mixed, fail if DNS is not dual stack. We test if
+#   kubernetes service is dual stack, but won't fail because of that
+# - if service CIDR is mixed, and the patch variable is true we patch the
+#   kubernetes service, if it isn't already dual stack, and fail if the patch
+#   doesn't take.
+#
+# Note that this all relies on the address ranges being specified in the k3s
+# config - otherwise we'd use built in defaults, and don't check anything here.
 - name: verify k3s service network configuration
   block:
-    - name: get kubernetes service details
+    - name: get kube-dns service details
       kubernetes.core.k8s_info:
         kubeconfig: "{{_k3s_kubecfg}}"
         kind: Service
@@ -55,6 +86,17 @@
         namespace: kube-system
       register: _k8s_svc
       until: _k8s_svc.resources | length > 0
+      retries: 20
+      delay: 5
+
+    - name: get kubernetes service details
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        name: kubernetes
+        namespace: default
+      register: _k8s_kubernetes_svc
+      until: _k8s_kubernetes_svc.resources | length > 0
       retries: 20
       delay: 5
 
@@ -74,20 +116,100 @@
         _actual_families: "{{ _k8s_svc.resources[0].spec.ipFamilies }}"
         _actual_policy: "{{ _k8s_svc.resources[0].spec.ipFamilyPolicy }}"
         _actual_cidrs: "{{ _service_cidr.resources[0].spec.cidrs | default([]) }}"
+        _actual_cluster_ips: "{{ _k8s_kubernetes_svc.resources[0].spec.clusterIPs | default([]) }}"
 
-    - name: validate networking stack matches configuration
-      fail:
-        msg: >-
-          Networking stack mismatch!
-          Configured CIDR: {{ _k3s_cfg.service_cidr }} (Count: {{ _expected_count }})
-          Actual Families: {{ _actual_families }}
-          Actual Policy: {{ _actual_policy }}
-          Expected Policy: {{ _expected_policy }}
-          Expected CIDRs: {{ _expected_cidrs }}
-          Actual CIDRs: {{ _actual_cidrs }}
+    - name: collect k3s service CIDR initialization logs
+      ansible.builtin.shell: >-
+        journalctl -u k3s --no-pager -o short-precise
+        | grep -iE 'service.cluster.ip|service.cidr|servicecidr|ipfamily|clusterip'
+        | tail -40
+      register: _k3s_cidr_logs
+      changed_when: false
+      failed_when: false
       when: >
         (_actual_families | length != _expected_count | int) or
         (_actual_policy != _expected_policy) or
         (_expected_cidrs | difference(_actual_cidrs) | length > 0) or
-        (_actual_cidrs | difference(_expected_cidrs) | length > 0)
+        (_actual_cidrs | difference(_expected_cidrs) | length > 0) or
+        (_k3s_patch_dualstack and (_actual_cluster_ips | length != _expected_count | int))
+
+    - name: show networking stack mismatch details
+      debug:
+        var: _networking_mismatch
+      vars:
+        _networking_mismatch:
+          expected:
+            cidr: "{{ _k3s_cfg.service_cidr }}"
+            policy: "{{ _expected_policy }}"
+            cidrs: "{{ _expected_cidrs }}"
+          actual:
+            kube_dns_families: "{{ _actual_families }}"
+            kube_dns_policy: "{{ _actual_policy }}"
+            service_cidr_resource: "{{ _actual_cidrs }}"
+            kubernetes_cluster_ips: "{{ _actual_cluster_ips }}"
+            patch_kubernetes_service: "{{ _k3s_patch_dualstack }}"
+      when: >
+        (_actual_families | length != _expected_count | int) or
+        (_actual_policy != _expected_policy) or
+        (_expected_cidrs | difference(_actual_cidrs) | length > 0) or
+        (_actual_cidrs | difference(_expected_cidrs) | length > 0) or
+        (_k3s_patch_dualstack and (_actual_cluster_ips | length != _expected_count | int))
+
+    - name: show k3s service CIDR initialization logs
+      debug:
+        msg: "{{ item }}"
+      loop: "{{ _k3s_cidr_logs.stdout_lines | default([]) }}"
+      when: >
+        _k3s_cidr_logs is defined and
+        _k3s_cidr_logs.stdout_lines | default([]) | length > 0
+
+    - name: patch kubernetes service to dual-stack
+      kubernetes.core.k8s_json_patch:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        name: kubernetes
+        namespace: default
+        patch:
+          - op: replace
+            path: /spec/ipFamilyPolicy
+            value: "{{ _expected_policy }}"
+          - op: replace
+            path: /spec/ipFamilies
+            value: "{{ ['IPv6', 'IPv4'] if _k3s_cfg.ip_preference | default('ipv4') == 'ipv6' else ['IPv4', 'IPv6'] }}"
+      when: >
+        _k3s_patch_dualstack == true and
+        _expected_count | int > 1 and
+        _actual_cluster_ips | length < _expected_count | int and
+        _actual_cidrs | length == _expected_count | int
+
+    - name: re-fetch kubernetes service after dual-stack patch
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        name: kubernetes
+        namespace: default
+      register: _k8s_kubernetes_svc_post
+      when: >
+        _k3s_patch_dualstack == true and
+        _expected_count | int > 1 and
+        _actual_cluster_ips | length < _expected_count | int and
+        _actual_cidrs | length == _expected_count | int
+
+    - name: update cluster IP facts after patch
+      set_fact:
+        _actual_cluster_ips: "{{ _k8s_kubernetes_svc_post.resources[0].spec.clusterIPs | default(_actual_cluster_ips) }}"
+      when: >
+        _k3s_patch_dualstack == true and
+        _k8s_kubernetes_svc_post is defined and
+        _k8s_kubernetes_svc_post.resources | default([]) | length > 0
+
+    - name: validate networking stack matches configuration
+      fail:
+        msg: "Networking stack mismatch — see details above"
+      when: >
+        (_actual_families | length != _expected_count | int) or
+        (_actual_policy != _expected_policy) or
+        (_expected_cidrs | difference(_actual_cidrs) | length > 0) or
+        (_actual_cidrs | difference(_expected_cidrs) | length > 0) or
+        (_k3s_patch_dualstack and (_actual_cluster_ips | length != _expected_count | int))
   when: _k3s_cfg.service_cidr is defined
