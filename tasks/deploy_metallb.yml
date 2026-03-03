@@ -1,4 +1,4 @@
-- name: push metallb config template
+- name: push metallb config template (present)
   become: false
   connection: local
   local_action:
@@ -7,11 +7,33 @@
     src: metallb.yaml.j2
     dest: "{{_k3s_debug_path}}/metallb.yaml"
   vars:
-    _pools: "{{_k3s_cfg.metallb.pools|default({})}}"
-    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})}}"
-    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})}}"
-  when: >
-    _k3s_debug_path is defined
+    _pools: >-
+      {{ (_k3s_cfg.metallb.pools|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
+    _advertisements: >-
+      {{ (_k3s_cfg.metallb.advertisements|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
+    _bgp_peers: >-
+      {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
+  when: _k3s_debug_path is defined
+
+- name: push metallb config template (absent)
+  become: false
+  connection: local
+  local_action:
+    module: ansible.builtin.template
+    mode: 0600
+    src: metallb.yaml.j2
+    dest: "{{_k3s_debug_path}}/metallb-remove.yaml"
+  vars:
+    _pools: "{{_k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+  when: _k3s_debug_path is defined
 
 - name: deploy metallb
   kubernetes.core.k8s:
@@ -32,6 +54,20 @@
   retries: 24
   delay: 5
 
+- name: remove metallb pools and advertisements
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition: "{{lookup('template', 'metallb.yaml.j2')}}"
+  vars:
+    _pools: "{{_k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+  when: >
+    (_pools | length > 0) or
+    (_advertisements | length > 0) or
+    (_bgp_peers | length > 0)
+
 - name: deploy metallb pools
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -39,6 +75,15 @@
     apply: yes
     definition: "{{lookup('template', 'metallb.yaml.j2')}}"
   vars:
-    _pools: "{{_k3s_cfg.metallb.pools|default({})}}"
-    _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})}}"
-    _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})}}"
+    _pools: >-
+      {{ (_k3s_cfg.metallb.pools|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
+    _advertisements: >-
+      {{ (_k3s_cfg.metallb.advertisements|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
+    _bgp_peers: >-
+      {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
+          _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
+         | items2dict }}
