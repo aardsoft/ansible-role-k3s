@@ -1,12 +1,20 @@
 # this is essentially https://longhorn.io/docs/1.8.1/deploy/uninstall/#uninstalling-longhorn-using-kubectl
 # with files pulled by the pull-longhorn-files script
 
+- name: check if longhorn-system namespace exists
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: longhorn-system
+  register: _longhorn_ns
+
 - name: remove longhorn
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     definition: "{{lookup('file', 'files/longhorn/uninstall.yaml')}}"
   ignore_errors: true
+  when: _longhorn_ns.resources | length > 0
 
 - name: wait for longhorn-uninstall job to complete
   kubernetes.core.k8s_info:
@@ -24,6 +32,7 @@
      selectattr('type', 'equalto', 'Complete') |
      selectattr('status', 'equalto', 'True') | list | length > 0)
   ignore_errors: true
+  when: _longhorn_ns.resources | length > 0
 
 - name: remove remaining references
   kubernetes.core.k8s:
@@ -36,3 +45,4 @@
     - uninstall
     - longhorn
   ignore_errors: true
+  when: _longhorn_ns.resources | length > 0
