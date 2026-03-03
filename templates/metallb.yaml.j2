@@ -30,6 +30,9 @@ metadata:
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
     ansible.version: "{{ansible_version}}"
 spec:
+{% for spec in _advertisements[advertisement].spec|default({}) %}
+  {{ spec }}
+{% endfor %}
   ipAddressPools:
 {% for pool in _advertisements[advertisement].pools %}
     - {{pool}}
