@@ -212,7 +212,7 @@
   when: _k3s_cluster_cidr is defined
 
 - set_fact:
-    _k3s_args: "{{k3s_role}}"
+    _k3s_args: "{{k3s_role}} {{_k3s_cfg.args|default('')}}"
   when: _k3s_cfg.use_config_file | default(false)
 
 - set_fact:
