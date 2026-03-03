@@ -39,7 +39,7 @@
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition: "{{lookup('file', 'metallb/metallb-native.yaml')}}"
+    definition: "{{lookup('file', 'metallb/metallb-frr.yaml' if _k3s_cfg.metallb.frr|default(false) else 'metallb/metallb-native.yaml')}}"
 
 - name: wait for metallb webhook to be ready
   kubernetes.core.k8s_info:
