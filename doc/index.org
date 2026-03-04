@@ -457,8 +457,12 @@ pod-name:
     workload_type: DaemonSet # Deployment (default) or DaemonSet
     state: absent            # omit or set to 'absent' to tear down
     default_container: name  # container for ansible sshkubectl (auto-set for single-container pods)
+    snippets:                # role names to load pod definitions from
+      - myrole               # loads roles/myrole/templates/k3s-pod.yml.j2
     labels:                  # extra labels added to pod template metadata
       my-label: my-value
+    node_selector:           # constrain pod scheduling to nodes with these labels
+      node-role: storage     # all keys must match; AND semantics
   network:
     if1:                     # interface key; becomes part of Service name: <pod>-if1
       ipv4: 1.2.3.4/24       # metallb LoadBalancer IP (CIDR notation)
@@ -535,10 +539,11 @@ pod-name:
 - =cluster= Hostname of the k3s cluster's =first_server= node. The pod will only be processed when ansible runs against this host. Required.
 - =namespace= Kubernetes namespace. Defaults to the pod name. The namespace is created automatically if it does not exist.
 - =workload_type= =Deployment= (default) or =DaemonSet=. Use =DaemonSet= for workloads that must run on every node (log collectors, monitoring agents, etc.).
-- =state= :: When set to =absent=, the workload, its Services, PVCs, ConfigMaps, and Secrets are all removed. Resources are removed in order: workload -> services -> PVCs -> ConfigMaps -> Secrets.
+- =state= When set to =absent=, the workload, its Services, PVCs, ConfigMaps, and Secrets are all removed. Resources are removed in order: workload -> services -> PVCs -> ConfigMaps -> Secrets.
 - =default_container= The container to target when ansible connects via sshkubectl. Automatically set for single-container pods; must be explicit for multi-container pods if you want =ansible pod-name= to target a specific container.
 - =labels= Extra labels added to the pod template metadata. Useful for pod selectors or Prometheus scraping.
 - =node_selector= Map of label key -> value used as a Kubernetes =nodeSelector=. The pod is only scheduled on nodes that carry all specified labels. Omit to allow scheduling on any node.
+- =snippets= A list of roles to load snippets for pod definitions from. Experimental, see detailed documentation below.
 
 *** =network= options
 
@@ -820,6 +825,64 @@ my-app:
             mountPath: /shared
           - name: ssh-host-keys
             mountPath: /config/ssh_host_keys
+#+END_SRC
+
+**** Pod snippets
+
+The =k3s.pod_snippets= key in a site definition takes a list of roles. For each named role, the inventory plugin included with this role loads =templates/k3s-pod.yml.j2= from that role's directory and merges its =pod:= section into the host definition. This happens at inventory construction time, so the merged container/volume layout is available for DNS generation, group membership, and the sshkubectl per-container host entries.
+
+Snippets are merged in list order (later entries override earlier ones). The host's own =pod:= block is always applied last and wins over all snippets. The behaviour in more detail is:
+
+- =containers= — deep merge per container; the overriding side wins per field. Nested dicts (=env=, =resources=) are themselves merged so adding one env var does not wipe the rest.
+- =volumes=, =configmaps=, =secrets= — list merge by =name=; an overriding entry with the same name replaces the base entry; unique entries from both sides are kept.
+- =tolerations= — concatenated (base first, then override).
+- All other keys — override wins outright.
+
+#+BEGIN_SRC yaml
+# site.yaml
+my-postgres:
+  type: k3s-pod
+  k3s:
+    cluster: storage1
+    snippets:
+      - postgresql         # loads roles/postgresql/templates/k3s-pod.yml.j2
+  network:
+    if1:
+      ipv4: 192.168.33.130/24
+      link: postgres
+  # pod: block is optional; any keys here override the snippet
+  pod:
+    containers:
+      postgres:
+        env:
+          POSTGRES_DB: mydb    # overrides snippet default
+#+END_SRC
+
+#+BEGIN_SRC yaml
+# roles/postgresql/templates/k3s-pod.yml.j2
+pod:
+  containers:
+    postgres:
+      image: postgres:16
+      ports:
+        - containerPort: 5432
+      env:
+        POSTGRES_DB: postgres
+        POSTGRES_USER: postgres
+  volumes:
+    - name: pgdata
+      persistentVolumeClaim:
+        claimName: "{{inventory_hostname}}-pgdata"
+        storageClass: longhorn
+        size: 20Gi
+#+END_SRC
+
+The =roles_path= setting in =ansible.cfg= (under =[site_yaml]=) controls where the plugin searches for roles. When unset, the Ansible default roles path is used.
+
+#+BEGIN_SRC ini
+# ansible.cfg
+[site_yaml]
+roles_path = /path/to/roles:/another/path
 #+END_SRC
 
 **** DaemonSet with hostPath volumes and tolerations
