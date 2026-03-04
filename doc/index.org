@@ -930,3 +930,45 @@ Set =state: absent= on the volumeMount and re-run (rolling update, PVC retained)
 **** Tearing down a pod
 
 Set =k3s.state: absent= and re-run. To keep the PVC data instead, remove the pod definition entirely rather than marking it absent.
+
+** Network policies
+
+The role can deploy Kubernetes =NetworkPolicy= resources to enforce a default-deny posture with opt-in exceptions. Policies are configured under =network_policies= in the cluster config and applied per namespace.
+
+The default-deny baseline and a DNS egress exception are always created. Additional access is granted by:
+
+- =system_namespaces= — bidirectional access to/from named system namespaces (covers CoreDNS, metrics-server, Prometheus scraping, MetalLB health checks, etc.) without requiring pod labels.
+- =dmz_cidrs= — ingress from and egress to external CIDRs for pods labelled =network/dmz: "true"=; cluster-internal node CIDRs (=k3s_cidrs=) are excluded from egress by address family.
+- =service_vlans= — per-VLAN ingress/egress policies; VLANs can reference =dhcp_networks= inventory entries or use explicit CIDRs. Pods use =network/<vlan>: "true"= to receive traffic from the VLAN, and =network/<vlan>-access: "true"= to initiate traffic to it.
+- Label =network/cluster-service: "true"= makes a pod reachable from any pod in any managed namespace without CIDR rules.
+
+Pod labels go in =k3s.labels= on a =k3s-pod= definition and are applied to the pod template.
+
+Network policy support is very experimental - expect breakage and syntax changes.
+
+#+BEGIN_SRC yaml
+k3s_clusters:
+  my-cluster:
+    network_policies:
+      namespaces:
+        - default
+        - production
+      system_namespaces:
+        - kube-system
+        - metallb-system
+        - monitoring
+      k3s_cidrs:
+        - "172.31.248.0/24"
+      dmz_cidrs:
+        - "0.0.0.0/0"
+        - "::/0"
+      service_vlans:
+        db:
+          vlan: db             # look up CIDRs from dhcp_networks.db.subnets
+        storage:
+          cidr: "10.0.30.0/24"
+        mgmt:
+          cidrs:
+            - "10.0.40.0/24"
+            - "fd00:40::/48"
+#+END_SRC

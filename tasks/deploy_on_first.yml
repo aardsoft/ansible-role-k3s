@@ -49,6 +49,9 @@
     _k3s_cfg.kured.state is defined and
     _k3s_cfg.kured.state == 'absent'
 
+- include_tasks: deploy_network_policies.yml
+  when: _k3s_cfg.network_policies is defined
+
 - name: manage k3s server manifests
   include_tasks: manage_server_manifests.yml
   when: _k3s_cfg.server_manifests is defined
