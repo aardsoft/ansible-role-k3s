@@ -54,7 +54,7 @@ spec:
 {% if ic.command is defined %}
         command:
 {% for cmd in ic.command %}
-        - {{cmd | to_yaml | trim}}
+        - {{cmd | to_yaml(width=99999) | trim}}
 {% endfor %}
 {% endif %}
 {% if ic.args is defined %}
@@ -64,7 +64,7 @@ spec:
           {{ic.args | indent(10) | trim}}
 {% else %}
 {% for arg in ic.args %}
-        - {{arg | to_yaml | trim}}
+        - {{arg | to_yaml(width=99999) | trim}}
 {% endfor %}
 {% endif %}
 {% endif %}
@@ -84,7 +84,7 @@ spec:
 {% if container.command is defined %}
         command:
 {% for cmd in container.command %}
-        - {{cmd | to_yaml | trim}}
+        - {{cmd | to_yaml(width=99999) | trim}}
 {% endfor %}
 {% endif %}
 {% if container.args is defined %}
@@ -94,7 +94,7 @@ spec:
           {{container.args | indent(10) | trim}}
 {% else %}
 {% for arg in container.args %}
-        - {{arg | to_yaml | trim}}
+        - {{arg | to_yaml(width=99999) | trim}}
 {% endfor %}
 {% endif %}
 {% endif %}
