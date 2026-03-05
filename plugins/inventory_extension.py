@@ -260,7 +260,6 @@ class InventoryExtension:
 
         hosts = data[valid_keys['hosts']]
         cluster_ssh = self._resolve_cluster_ssh(plugin, hosts, host_def)
-        namespace = host_def.get('k3s', {}).get('namespace')
 
         plugin.inventory.add_group('k3s_pods')
         plugin.inventory.add_child('k3s_pods', host)
@@ -270,8 +269,6 @@ class InventoryExtension:
         plugin.inventory.set_variable(host, 'ansible_kubectl_kubeconfig', '/etc/rancher/k3s/k3s.yaml')
         if cluster_ssh:
             plugin.inventory.set_variable(host, 'ansible_host', '%s@%s' % (host, cluster_ssh))
-        if namespace:
-            plugin.inventory.set_variable(host, 'ansible_kubectl_namespace', namespace)
 
         # determine default container (single container or explicitly marked)
         containers = host_def.get('pod', {}).get('containers', {})
@@ -305,7 +302,5 @@ class InventoryExtension:
             plugin.inventory.set_variable(cnt_host, 'ansible_kubectl_kubeconfig', '/etc/rancher/k3s/k3s.yaml')
             if cluster_ssh:
                 plugin.inventory.set_variable(cnt_host, 'ansible_host', '%s@%s' % (host, cluster_ssh))
-            if namespace:
-                plugin.inventory.set_variable(cnt_host, 'ansible_kubectl_namespace', namespace)
 
         return {'network_pods': {host: host_def}}
