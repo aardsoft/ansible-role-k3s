@@ -1,0 +1,11 @@
+{% set _ns = namespace(key_list=[]) %}
+{% if _ak_use_management | bool and management_keys is defined %}
+{% set _mgmt = management_keys if management_keys is not string else [management_keys] %}
+{% set _ns.key_list = _ns.key_list + _mgmt %}
+{% endif %}
+{% set _extra = _ak_key_names | default([]) %}
+{% set _extra = _extra if _extra is not string else [_extra] %}
+{% set _ns.key_list = _ns.key_list + _extra %}
+{% for key in _ns.key_list %}
+{{ lookup('file', 'authorized_keys.d/' + key) }}
+{% endfor %}

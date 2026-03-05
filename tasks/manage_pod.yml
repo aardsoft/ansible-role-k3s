@@ -42,10 +42,52 @@
     state: present
     apply: yes
     definition: "{{lookup('template', 'pod-configmap.yml.j2')}}"
-  loop: "{{_pod_configmaps}}"
+  register: _data_cm_results
+  loop: "{{_pod_configmaps | rejectattr('authorized_keys', 'defined') | rejectattr('file', 'defined') | list}}"
   loop_control:
     loop_var: _configmap
     label: "{{_configmap.name}}"
+
+- name: create authorized_keys ConfigMaps for pod
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition:
+      apiVersion: v1
+      kind: ConfigMap
+      metadata:
+        name: "{{_ak_cm.name}}"
+        namespace: "{{_pod_namespace}}"
+        labels:
+          app: "{{_pod_name}}"
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
+      data:
+        authorized_keys: "{{lookup('template', 'pod-authorized-keys.j2')}}"
+  register: _ak_cm_results
+  loop: "{{_pod_configmaps | selectattr('authorized_keys', 'defined') | list}}"
+  loop_control:
+    loop_var: _ak_cm
+    label: "{{_ak_cm.name}}"
+  vars:
+    _ak_use_management: "{{_ak_cm.authorized_keys.management | default(false)}}"
+    _ak_key_names: "{{_ak_cm.authorized_keys.key_names | default([])}}"
+
+- name: create file-backed ConfigMaps for pod
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{lookup('template', 'pod-configmap-file.yml.j2')}}"
+  register: _file_cm_results
+  loop: "{{_pod_configmaps | selectattr('file', 'defined') | list}}"
+  loop_control:
+    loop_var: _file_cm
+    label: "{{_file_cm.name}}"
 
 - name: generate Secrets for pod
   include_tasks: generate_ssh_host_key_secret.yml

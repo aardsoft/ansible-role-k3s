@@ -500,6 +500,11 @@ pod-name:
         data:
           config.yaml: |
             key: value
+      - name: my-authorized-keys  # assembled from authorized_keys.d/ files
+        authorized_keys:
+          management: true   # include management_keys variable
+          key_names:         # additional named keys from authorized_keys.d/
+            - deploy-bot
     secrets:                 # Secrets managed alongside the pod
       - name: my-secret
         generate: ssh-host-keys  # auto-generate an Ed25519 host key pair
@@ -649,6 +654,41 @@ configmaps:
           port: 8080
       another-key: single-line-value
 #+END_SRC
+
+**** File
+
+- =file= Map of key -> path. Each path is relative to =playbook_dir= and loaded at run time via =lookup('file', ...)=. The file content becomes the ConfigMap value for that key. Fails loudly if a referenced file does not exist.
+
+Use this when the config is maintained as a file in the playbook repository rather than inlined in the host definition.
+
+#+BEGIN_SRC yaml
+configmaps:
+  - name: app-sidecar-config
+    file:
+      config.yml: files/app-sidecar-config.yml
+#+END_SRC
+
+Like =data= configmaps, changes to file-backed ConfigMaps that are mounted via =subPath= trigger an automatic rolling restart of the workload.
+
+**** Authorized keys
+
+- =authorized_keys= Assembles an =authorized_keys= file from keys stored in =authorized_keys.d/= (the same files used by =basic-host= for management user keys).
+
+  - =management= Boolean. When =true=, includes all keys listed in the =management_keys= playbook variable.
+  - =key_names= Optional list of additional key filenames to include from =authorized_keys.d/=.
+
+Both fields are optional and can be combined; management keys come first.
+
+#+BEGIN_SRC yaml
+configmaps:
+  - name: my-pod-authorized-keys
+    authorized_keys:
+      management: true       # include all management_keys
+      key_names:             # plus any additional named keys
+        - deploy-bot
+#+END_SRC
+
+Mount it into the container with =subPath: authorized_keys= and point sshd at it via =-o AuthorizedKeysFile=/path/authorized_keys=. When sshd runs as a non-root user, also pass =-o StrictModes=no= since ConfigMap-mounted files are owned by root.
 
 *** =pod.secrets=
 
