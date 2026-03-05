@@ -14,6 +14,9 @@
     _pod_node_selector: "{{(_pod.value.k3s|default({})).node_selector|default({})}}"
     _pod_configmaps: "{{(_pod.value.pod|default({})).configmaps|default([])}}"
     _pod_secrets: "{{(_pod.value.pod|default({})).secrets|default([])}}"
+    _pod_init_containers: "{{(_pod.value.pod|default({})).initContainers|default([])}}"
+    _pod_manifest: "{{(_pod.value.pod|default({})).manifest|default(false)}}"
+    _pod_selector: "{{(_pod.value.k3s|default({})).selector|default({'app': _pod.key})}}"
 
 - name: create namespace
   kubernetes.core.k8s:
@@ -70,20 +73,37 @@
     mode: 0600
     src: pod-deployment.yml.j2
     dest: "{{_k3s_debug_path}}/{{_pod_name}}-{{_pod_workload_type | lower}}.yaml"
-  when: _k3s_debug_path is defined
+  when: _k3s_debug_path is defined and not _pod_manifest
 
-- name: deploy workload
+- name: push raw manifest for debug
+  become: false
+  connection: local
+  copy:
+    mode: 0600
+    content: "{{_pod_manifest | to_nice_yaml}}"
+    dest: "{{_k3s_debug_path}}/{{_pod_name}}-manifest.yaml"
+  when: _k3s_debug_path is defined and _pod_manifest
+
+- name: deploy workload from template
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
     definition: "{{lookup('template', 'pod-deployment.yml.j2')}}"
-  when: _pod_containers | length > 0
+  when: not _pod_manifest and _pod_containers | length > 0
 
-- name: warn if no containers defined
+- name: apply raw workload manifest
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_pod_manifest}}"
+  when: _pod_manifest
+
+- name: warn if no containers or manifest defined
   debug:
-    msg: "WARNING: pod {{_pod_name}} has no containers defined, skipping deployment"
-  when: _pod_containers | length == 0
+    msg: "WARNING: pod {{_pod_name}} has neither pod.containers nor pod.manifest defined, skipping workload deployment"
+  when: not _pod_manifest and _pod_containers | length == 0
 
 # Clean up PVCs for volumes that were removed from config. This runs after the
 # Deployment update so the rolling update has already removed the volumeMount
@@ -200,13 +220,15 @@
   set_fact:
     _expected_service_names: >-
       {{ _pod_networks | dict2items
-         | selectattr('value.ipv4', 'defined')
+         | selectattr('value.addresses', 'defined')
          | map(attribute='key')
          | map('regex_replace', '^', _pod_name ~ '-')
          | list }}
 
-# this is currently somewhat hardcoded to metallb changes - but should be
-# relatively easy to expand that later on as we hit other syntax changes
+# Delete services that are stale (removed from config) or that use the
+# deprecated spec.loadBalancerIP field instead of the metallb annotation.
+# Server-side apply handles port protocol conflicts (UDP+TCP on same port)
+# correctly, but requires a clean slate when migrating from loadBalancerIP.
 - name: remove stale or format-migrating LoadBalancer services
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -222,24 +244,29 @@
     label: "{{item.metadata.name}}"
   when: >
     item.metadata.name not in _expected_service_names or
-    'metallb.universe.tf/loadBalancerIPs' in (item.metadata.annotations | default({}))
+    'metallb.universe.tf/loadBalancerIPs' not in (item.metadata.annotations | default({}))
 
 # Create LoadBalancer services for each network interface that has an IP and ports configured.
-# The 'link' field in network config maps an interface to a container name.
-# Only create service if the linked container has ports defined.
-# _iface_ports is computed inside the template from _pod_containers and _network_iface.
+# Port sources in order of precedence:
+#   ports:  explicit list on the interface itself (use with pod.manifest)
+#   links:  list of container names; ports collected from each (simple mode)
+#   link:   single container name; ports collected from it (simple mode)
 - name: deploy LoadBalancer service for external IP
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    apply: yes
+    server_side_apply:
+      field_manager: ansible
+      force_conflicts: true
     definition: "{{lookup('template', 'pod-service.yml.j2')}}"
   with_dict: "{{_pod_networks}}"
   loop_control:
     loop_var: _network_iface
   when: >
-    _network_iface.value.ipv4 is defined and
-    ((_network_iface.value.link is defined and
+    _network_iface.value.addresses is defined and
+    _network_iface.value.addresses | length > 0 and
+    (_network_iface.value.ports is defined or
+     (_network_iface.value.link is defined and
       _network_iface.value.link in _pod_containers and
       (_pod_containers[_network_iface.value.link].ports | default([])) | length > 0) or
      (_network_iface.value.links is defined and
@@ -252,7 +279,9 @@
   loop_control:
     loop_var: _network_iface
   when: >
-    _network_iface.value.ipv4 is defined and
+    _network_iface.value.addresses is defined and
+    _network_iface.value.addresses | length > 0 and
+    _network_iface.value.ports is undefined and
     _network_iface.value.links is undefined and
     ((_network_iface.value.link is undefined) or
      (_network_iface.value.link not in _pod_containers) or

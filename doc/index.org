@@ -430,8 +430,10 @@ When using the =data-utilities= role this variable is managed by that.
 *** =_k3s_debug_path=
 When defined, generated Kubernetes manifests are written to this local directory before being applied. This is useful for inspecting what the role is about to apply without running against a live cluster. Currently saves:
 
-- =metallb.yaml= — the rendered metallb pool/advertisement config
-- ={pod-name}-deployment.yaml= — the rendered Deployment or DaemonSet for each pod
+- =metallb.yaml= — the rendered metallb pool/advertisement config (present-state entries only)
+- =metallb-remove.yaml= — metallb entries marked =state: absent= (removal pass)
+- ={pod-name}-{workload-type}.yaml= — the rendered Deployment or DaemonSet for simple-mode pods
+- ={pod-name}-manifest.yaml= — the raw manifest for =pod.manifest= pods
 
 #+BEGIN_SRC yaml
 # ansible-playbook -l storage1 playbooks/k3s.yml -e _k3s_debug_path=/tmp/k3s-debug
@@ -463,13 +465,22 @@ pod-name:
       my-label: my-value
     node_selector:           # constrain pod scheduling to nodes with these labels
       node-role: storage     # all keys must match; AND semantics
+    selector:                # service selector labels (default: {app: pod-name})
+      app: pod-name          # override when using pod.manifest with non-default pod labels
+      component: backend
   network:
     if1:                     # interface key; becomes part of Service name: <pod>-if1
-      ipv4: 1.2.3.4/24       # metallb LoadBalancer IP (CIDR notation)
+      ipv4: 1.2.3.4/24       # IPv4 metallb LoadBalancer IP (CIDR notation)
+      ipv6: "fd00::1/48"     # IPv6 metallb LoadBalancer IP (CIDR notation)
       link: container-name   # single container whose ports define the Service ports
       links:                 # alternative to link: aggregate ports from multiple containers
         - container-a
         - container-b
+      ports:                 # explicit ports; use with pod.manifest (no containers dict)
+        - containerPort: 53
+          protocol: UDP
+        - containerPort: 53
+          protocol: TCP
   pod:
     tolerations:             # pod-level tolerations (useful for DaemonSets)
       - effect: NoSchedule
@@ -477,6 +488,13 @@ pod-name:
       - effect: NoExecute
         key: node-role.kubernetes.io/control-plane
         operator: Exists
+    initContainers:          # run to completion before main containers start
+      - name: setup
+        image: busybox:latest
+        command: [sh, -c, "chmod a+rwx /data"]
+        volumeMounts:
+          - name: vol-name
+            mountPath: /data
     configmaps:              # ConfigMaps created and managed alongside the pod
       - name: my-config
         data:
@@ -493,7 +511,8 @@ pod-name:
           size: 1Gi                # storage size (default: 1Gi)
           accessMode: ReadWriteOnce
       - name: shared-mem
-        emptyDir: {}
+        emptyDir:
+          sizeLimit: 100Mi   # optional size cap; omit for unlimited
       - name: host-logs
         hostPath:
           path: /var/log/pods
@@ -505,11 +524,21 @@ pod-name:
         secret:
           secretName: my-secret  # references a Secret (managed or pre-existing)
           defaultMode: 0400      # optional: file permission mode (octal)
-    containers:
+    manifest:                # raw Kubernetes resource dict (mutually exclusive with containers)
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: pod-name
+        namespace: pod-name
+      spec: {}               # full k8s spec; role only wraps namespace/secrets/services
+    containers:              # simple mode: role generates a Deployment from this dict
       container-name:
         image: image:tag
+        command:             # override image ENTRYPOINT (each element is a separate entry)
+          - /usr/sbin/sshd
+          - -D
         args:
-          - -flag=value      # command-line arguments passed to the container
+          - -flag=value      # arguments passed to entrypoint (or command if set)
         ports:
           - containerPort: 80
           - containerPort: 443
@@ -532,6 +561,16 @@ pod-name:
           - name: old-vol
             mountPath: /old
             state: absent    # remove this mount without removing the volume entry
+        securityContext:     # optional container security context
+          runAsUser: 1000
+          runAsGroup: 1000
+          runAsNonRoot: true
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          privileged: false
+          capabilities:
+            drop: [ALL]
+            add: [NET_BIND_SERVICE]
 #+END_SRC
 
 *** =k3s= options
@@ -543,17 +582,40 @@ pod-name:
 - =default_container= The container to target when ansible connects via sshkubectl. Automatically set for single-container pods; must be explicit for multi-container pods if you want =ansible pod-name= to target a specific container.
 - =labels= Extra labels added to the pod template metadata. Useful for pod selectors or Prometheus scraping.
 - =node_selector= Map of label key -> value used as a Kubernetes =nodeSelector=. The pod is only scheduled on nodes that carry all specified labels. Omit to allow scheduling on any node.
+- =selector= Map of label key -> value used as the =selector= in generated LoadBalancer Services. Defaults to ={app: <pod-name>}=, which matches the label the role adds to pod templates in simple mode. When using =pod.manifest= with custom pod labels, set this to match the =matchLabels= in your manifest so traffic reaches the right pods.
 - =snippets= A list of roles to load snippets for pod definitions from. Experimental, see detailed documentation below.
 
 *** =network= options
 
 Each key under =network= maps to one LoadBalancer Service. The Service name is =<pod-name>-<interface-key>=.
 
-- =ipv4= IPv4 address in CIDR notation. The address portion is used as the metallb =spec.loadBalancerIP=.
-- =link= Name of a single container. The Service ports are derived from that container's =ports= list.
-- =links= List of container names. Port lists from all named containers are merged into a single Service. Use this when one IP should serve ports from multiple containers (e.g. HTTP on one container, SSH on another).
+**** Address fields
 
-A Service is only created when the referenced container(s) have ports defined. Stale Services (removed from =network= config) and Services carrying the deprecated =metallb.universe.tf/loadBalancerIPs= annotation are deleted before the current Services are applied, ensuring clean migration between metallb configuration formats.
+When an interface carries only IPv4 addresses, a =SingleStack= IPv4 Service is created. When only IPv6, a =SingleStack= IPv6 Service. When both families are present, a =RequireDualStack= Service is created with the =metallb.universe.tf/loadBalancerIPs= annotation (comma-separated IPv4,IPv6).
+
+To have separate Services for IPv4 and IPv6 — which is the recommended approach when different containers handle the two families — use two interface keys, each with only one address:
+
+#+BEGIN_SRC yaml
+network:
+  if1:
+    ipv4: 192.0.2.10/28
+    links: [v4-container, sidecar]
+  if2:
+    ipv6: "fd42:0:1::1/48"
+    links: [v6-container, sidecar]
+#+END_SRC
+
+**** Port fields
+
+Exactly one of the following must be set for a Service to be created:
+
+- =ports= Explicit port list on the interface. Use this in raw manifest mode (=pod.manifest=) where there is no containers dict to derive ports from. Format is identical to a Kubernetes container =ports= list.
+- =links= List of container names (from =pod.containers=). Port lists from all named containers are merged. Use when one Service IP should expose ports from multiple containers.
+- =link= Single container name. Ports are taken from that container's =ports= list.
+
+=ports= takes precedence over =links=/=link=. When the same port number appears with different protocols (e.g. DNS on 53/UDP and 53/TCP), both are included as distinct Service port entries. Port name disambiguation uses the protocol suffix (=port-53-udp=, =port-53-tcp=).
+
+A Service is only created when an address and at least one port source are defined. Stale Services (removed from =network= config) and Services carrying the deprecated =metallb.universe.tf/loadBalancerIPs= annotation on interfaces that are not configured as dual-stack are deleted before current Services are applied.
 
 *** =pod.tolerations=
 
@@ -572,8 +634,10 @@ tolerations:
 
 List of ConfigMaps to create and manage alongside the pod. ConfigMaps are created before the workload so they are available at pod start. Stale ConfigMaps (removed from the list) are deleted after the workload is updated.
 
-Each entry requires:
-- =name= ConfigMap name (must be unique within the namespace).
+Each entry requires =name= (must be unique within the namespace) and one of the following content sources:
+
+**** Raw data
+
 - =data= Map of key -> value. Multi-line values use YAML block literal syntax (=|=).
 
 #+BEGIN_SRC yaml
@@ -663,11 +727,15 @@ PVCs are not deleted during teardown if the volume is still referenced in =pod.v
 
 **** emptyDir
 
-Ephemeral volume, lost when the pod restarts. Useful for shared scratch space between containers or for state that does not need to persist.
+Ephemeral volume, lost when the pod restarts. Useful for shared scratch space between containers or for state that does not need to persist. An optional =sizeLimit= caps the amount of node storage this volume may consume.
 
 #+BEGIN_SRC yaml
 - name: cache
-  emptyDir: {}
+  emptyDir: {}              # unlimited
+
+- name: zone-data
+  emptyDir:
+    sizeLimit: 100Mi        # optional cap
 #+END_SRC
 
 **** hostPath
@@ -715,14 +783,23 @@ volumeMounts:
 
 *** =pod.containers=
 
-Map of container name -> container definition. Multiple containers in one pod share the same network namespace and can share volumes.
+A map of container name -> container definitions. Multiple containers in one pod share the same network namespace and can share volumes.
 
 - =image= Container image, including tag. Required.
-- =args= List of command-line arguments passed to the container entrypoint.
+- =command= List of strings that overrides the container image's =ENTRYPOINT=. Use this to run a different binary than the image default (e.g. starting =sshd= in an image whose default entrypoint is an application process). Each element is a separate list entry; flags and their values must be separate entries. When both =command= and =args= are set, =command= is the executable and =args= are its arguments.
+- =args= List of command-line arguments passed to the container entrypoint (or to =command= if set).
 - =ports= List of =containerPort= entries. Ports declared here are used to populate LoadBalancer Service definitions. Optional =protocol= field (default TCP).
 - =env= Map of environment variable name -> value.
 - =resources= =requests= and =limits= maps with standard Kubernetes resource keys (=cpu=, =memory=).
 - =volumeMounts= List of volume mounts. Each entry requires =name= (matching a =pod.volumes= entry) and =mountPath=. Optional =readOnly: true=. Optional =subPath=: mount a single key from a Secret or ConfigMap volume at the given path without replacing the parent directory.
+- =securityContext= Container-level security context. Supported fields:
+  - =runAsUser= UID to run the container process as.
+  - =runAsGroup= GID for the container process.
+  - =runAsNonRoot= Require a non-zero UID.
+  - =readOnlyRootFilesystem= Mount the container root filesystem read-only. Processes that need to write (logs, temp files) must use =volumeMounts= to writable volumes.
+  - =allowPrivilegeEscalation= Allow the container process to gain more privileges than its parent. Set to =false= for least-privilege containers.
+  - =privileged= Run the container with full host privileges. Avoid unless absolutely necessary.
+  - =capabilities.add= / =capabilities.drop= Linux capability adjustments. Common pattern: =drop: [ALL]= then =add:= only what is needed.
 
 **** Removing a volumeMount without removing the volume
 
@@ -738,6 +815,110 @@ volumeMounts:
 #+END_SRC
 
 This triggers a rolling update. Once the rolling update completes and pods no longer reference the volume, remove the entry from =pod.volumes= as well to trigger PVC deletion.
+
+*** =pod.initContainers=
+
+A list of init containers that run to completion before any main container starts, see the [[https://kubernetes.io/docs/concepts/workloads/pods/init-containers/][k8s documentation]] for more details.
+
+Each entry supports:
+- =name= Init container name. Required.
+- =image= Container image. Required.
+- =command= List of strings forming the command to run (overrides the image entrypoint).
+- =volumeMounts= List of volume mounts (same format as in =pod.containers=).
+
+Init containers always run as root unless the image specifies otherwise; they do not inherit the =securityContext= of the main containers.
+
+A common use case is fixing permissions on an =emptyDir= volume before read-only main containers chroot into it:
+
+#+BEGIN_SRC yaml
+pod:
+  initContainers:
+    - name: init-data-dir
+      image: busybox:latest
+      command:
+        - sh
+        - -c
+        - chmod a+rwx /data
+      volumeMounts:
+        - name: data
+          mountPath: /data
+  containers:
+    myapp:
+      image: myapp:latest
+      volumeMounts:
+        - name: data
+          mountPath: /data
+          readOnly: true
+#+END_SRC
+
+*** =pod.manifest=
+
+A raw Kubernetes manifest, useful for more complex setups, when configuration should stay as close to vanilla k8s as possible, or when the automations this role is offering don't offer more value than sticking to k8s notation. The role applies it with =apply= semantics and continues to handle everything around it: namespace creation, secret generation, and LoadBalancer Services derived from =network=.
+
+=pod.manifest= and =pod.containers= are mutually exclusive. If both are present, =pod.manifest= wins and =pod.containers= is ignored.
+
+Because there is no containers dict to derive ports from they must be explicitly declared on each network interface using the =ports= key. The manifest namespace must match =k3s.namespace= (defaulting to the pod name): the role creates the namespace before applying the manifest.
+
+If the manifest's pod template uses labels other than =app: <pod-name>=, set =k3s.selector= to match those labels so the generated Services route correctly.
+
+#+BEGIN_SRC yaml
+mypod:
+  type: k3s-pod
+  groups: k3s_mycluster
+  k3s:
+    cluster: storage1
+    selector:
+      app: mypod
+      component: web
+  network:
+    if1:
+      ipv4: 192.0.2.10/28
+      ports:
+        - containerPort: 443
+          protocol: TCP
+        - containerPort: 80
+          protocol: TCP
+  pod:
+    secrets:
+      - name: mypod-tls
+        generate: ssh-host-keys
+    manifest:
+      apiVersion: apps/v1
+      kind: Deployment
+      metadata:
+        name: mypod
+        namespace: mypod
+      spec:
+        replicas: 2
+        selector:
+          matchLabels:
+            app: mypod
+            component: web
+        template:
+          metadata:
+            labels:
+              app: mypod
+              component: web
+          spec:
+            initContainers:
+              - name: init-config
+                image: busybox
+                command: [sh, -c, "cp /etc/secrets/* /run/config/"]
+            containers:
+              - name: web
+                image: myrepo/web:latest
+                ports:
+                  - containerPort: 443
+                    protocol: TCP
+                  - containerPort: 80
+                    protocol: TCP
+                readinessProbe:
+                  httpGet:
+                    path: /healthz
+                    port: 80
+                  initialDelaySeconds: 5
+                  periodSeconds: 10
+#+END_SRC
 
 *** Lifecycle and state management
 

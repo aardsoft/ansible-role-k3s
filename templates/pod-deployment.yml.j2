@@ -46,15 +46,57 @@ spec:
         {{sel_key}}: "{{sel_value}}"
 {% endfor %}
 {% endif %}
+{% if _pod_init_containers | length > 0 %}
+      initContainers:
+{% for ic in _pod_init_containers %}
+      - name: {{ic.name}}
+        image: {{ic.image}}
+{% if ic.command is defined %}
+        command:
+{% for cmd in ic.command %}
+        - {{cmd | to_yaml | trim}}
+{% endfor %}
+{% endif %}
+{% if ic.args is defined %}
+        args:
+{% if ic.args is string %}
+        - |
+          {{ic.args | indent(10) | trim}}
+{% else %}
+{% for arg in ic.args %}
+        - {{arg | to_yaml | trim}}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% if ic.volumeMounts is defined %}
+        volumeMounts:
+{% for mount in ic.volumeMounts %}
+        - name: {{mount.name}}
+          mountPath: {{mount.mountPath}}
+{% endfor %}
+{% endif %}
+{% endfor %}
+{% endif %}
       containers:
 {% for container_name, container in _pod_containers.items() %}
       - name: {{container_name}}
         image: {{container.image}}
+{% if container.command is defined %}
+        command:
+{% for cmd in container.command %}
+        - {{cmd | to_yaml | trim}}
+{% endfor %}
+{% endif %}
 {% if container.args is defined %}
         args:
+{% if container.args is string %}
+        - |
+          {{container.args | indent(10) | trim}}
+{% else %}
 {% for arg in container.args %}
-        - "{{arg}}"
+        - {{arg | to_yaml | trim}}
 {% endfor %}
+{% endif %}
 {% endif %}
 {% if container.ports is defined %}
         ports:
@@ -103,6 +145,42 @@ spec:
 {% endfor %}
 {% endif %}
 {% endif %}
+{% if container.securityContext is defined %}
+        securityContext:
+{% if container.securityContext.runAsUser is defined %}
+          runAsUser: {{container.securityContext.runAsUser}}
+{% endif %}
+{% if container.securityContext.runAsGroup is defined %}
+          runAsGroup: {{container.securityContext.runAsGroup}}
+{% endif %}
+{% if container.securityContext.runAsNonRoot is defined %}
+          runAsNonRoot: {{container.securityContext.runAsNonRoot | lower}}
+{% endif %}
+{% if container.securityContext.readOnlyRootFilesystem is defined %}
+          readOnlyRootFilesystem: {{container.securityContext.readOnlyRootFilesystem | lower}}
+{% endif %}
+{% if container.securityContext.allowPrivilegeEscalation is defined %}
+          allowPrivilegeEscalation: {{container.securityContext.allowPrivilegeEscalation | lower}}
+{% endif %}
+{% if container.securityContext.privileged is defined %}
+          privileged: {{container.securityContext.privileged | lower}}
+{% endif %}
+{% if container.securityContext.capabilities is defined %}
+          capabilities:
+{% if container.securityContext.capabilities.add is defined %}
+            add:
+{% for cap in container.securityContext.capabilities.add %}
+            - {{cap}}
+{% endfor %}
+{% endif %}
+{% if container.securityContext.capabilities.drop is defined %}
+            drop:
+{% for cap in container.securityContext.capabilities.drop %}
+            - {{cap}}
+{% endfor %}
+{% endif %}
+{% endif %}
+{% endif %}
 {% endfor %}
 {% if _pod_volumes is defined and _pod_volumes | length > 0 %}
       volumes:
@@ -113,7 +191,12 @@ spec:
           claimName: {{volume.persistentVolumeClaim.claimName}}
 {% endif %}
 {% if volume.emptyDir is defined %}
+{% if volume.emptyDir is mapping and volume.emptyDir.sizeLimit is defined %}
+        emptyDir:
+          sizeLimit: {{volume.emptyDir.sizeLimit}}
+{% else %}
         emptyDir: {}
+{% endif %}
 {% endif %}
 {% if volume.hostPath is defined %}
         hostPath:

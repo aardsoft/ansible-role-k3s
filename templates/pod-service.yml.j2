@@ -1,12 +1,25 @@
-{% if _network_iface.value.links is defined %}
-{% set ns = namespace(iface_ports=[]) %}
+{% if _network_iface.value.ports is defined %}
+{% set _iface_ports = _network_iface.value.ports %}
+{% elif _network_iface.value.links is defined %}
+{% set _ns = namespace(iface_ports=[]) %}
 {% for link_name in _network_iface.value.links %}
-{% set ns.iface_ports = ns.iface_ports + (_pod_containers[link_name].ports | default([])) %}
+{% set _ns.iface_ports = _ns.iface_ports + (_pod_containers[link_name].ports | default([])) %}
 {% endfor %}
-{% set _iface_ports = ns.iface_ports %}
+{% set _iface_ports = _ns.iface_ports %}
 {% else %}
 {% set _iface_ports = _pod_containers[_network_iface.value.link].ports | default([]) %}
 {% endif %}
+{% set _addrs = _network_iface.value.addresses | default({}) %}
+{% set _ans = namespace(v4=[], v6=[]) %}
+{% for addr in _addrs %}
+{% if ':' in addr %}
+{% set _ans.v6 = _ans.v6 + [addr] %}
+{% else %}
+{% set _ans.v4 = _ans.v4 + [addr] %}
+{% endif %}
+{% endfor %}
+{% set _has_v4 = _ans.v4 | length > 0 %}
+{% set _has_v6 = _ans.v6 | length > 0 %}
 apiVersion: v1
 kind: Service
 metadata:
@@ -19,14 +32,36 @@ metadata:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
     ansible.version: "{{ansible_version.full}}"
+{% if _has_v4 and _has_v6 %}
+    metallb.universe.tf/loadBalancerIPs: "{{_ans.v4[0] | regex_replace('/.*$', '')}},{{_ans.v6[0] | regex_replace('/.*$', '')}}"
+{% elif _has_v4 %}
+    metallb.universe.tf/loadBalancerIPs: "{{_ans.v4[0] | regex_replace('/.*$', '')}}"
+{% elif _has_v6 %}
+    metallb.universe.tf/loadBalancerIPs: "{{_ans.v6[0] | regex_replace('/.*$', '')}}"
+{% endif %}
 spec:
   type: LoadBalancer
-  loadBalancerIP: "{{_network_iface.value.ipv4 | regex_replace('/.*$', '')}}"
+{% if _has_v4 and _has_v6 %}
+  ipFamilyPolicy: RequireDualStack
+  ipFamilies:
+  - IPv4
+  - IPv6
+{% elif _has_v4 %}
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv4
+{% else %}
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+  - IPv6
+{% endif %}
   selector:
-    app: {{_pod_name}}
+{% for _sel_key, _sel_val in _pod_selector.items() %}
+    {{_sel_key}}: "{{_sel_val}}"
+{% endfor %}
   ports:
 {% for port in _iface_ports %}
-  - name: "port-{{port.containerPort|default(port)}}"
+  - name: "port-{{port.containerPort|default(port)}}-{{port.protocol | default('tcp') | lower}}"
     port: {{port.containerPort|default(port)}}
     targetPort: {{port.containerPort|default(port)}}
 {% if port.protocol is defined %}
