@@ -159,6 +159,27 @@
     msg: "WARNING: pod {{_pod_name}} has neither pod.containers nor pod.manifest defined, skipping workload deployment"
   when: not _pod_manifest and _pod_containers | length == 0
 
+# ConfigMaps mounted via subPath are not updated automatically in running pods.
+# Patch the workload with a restart timestamp to trigger a rolling update whenever
+# any such ConfigMap content changes (authorized_keys or inline data configmaps).
+- name: rollout restart workload if subPath-mounted ConfigMap changed
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    kind: "{{_pod_workload_type}}"
+    name: "{{_pod_name}}"
+    namespace: "{{_pod_namespace}}"
+    definition:
+      spec:
+        template:
+          metadata:
+            annotations:
+              kubectl.kubernetes.io/restartedAt: "{{ansible_date_time.iso8601}}"
+  when:
+    - not _pod_manifest
+    - _pod_containers | length > 0
+    - (_ak_cm_results.changed | default(false)) or (_data_cm_results.changed | default(false)) or (_file_cm_results.changed | default(false)) or (_template_cm_results.changed | default(false))
+
 # Clean up PVCs for volumes that were removed from config. This runs after the
 # Deployment update so the rolling update has already removed the volumeMount
 # from the pod spec.  The pvc-protection finalizer ensures K8s won't actually
