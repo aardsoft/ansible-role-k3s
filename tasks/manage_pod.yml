@@ -1,7 +1,7 @@
 # Manages a single k3s-pod definition from network_nodes/network_pods.
 # Called with _pod as loop variable: {key: pod_name, value: pod_definition}
 
-- name: set pod facts
+- name: "set pod facts ({{_pod.key}})"
   set_fact:
     _pod_name: "{{_pod.key}}"
     _pod_namespace: "{{(_pod.value.k3s|default({})).namespace|default(_pod.key)}}"
@@ -18,7 +18,7 @@
     _pod_manifest: "{{(_pod.value.pod|default({})).manifest|default(false)}}"
     _pod_selector: "{{(_pod.value.k3s|default({})).selector|default({'app': _pod.key})}}"
 
-- name: create namespace
+- name: "create namespace ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -36,19 +36,19 @@
           ansible.version: "{{ansible_version.full}}"
   when: _pod_namespace != 'default'
 
-- name: create ConfigMaps for pod
+- name: "create ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
     definition: "{{lookup('template', 'pod-configmap.yml.j2')}}"
   register: _data_cm_results
-  loop: "{{_pod_configmaps | rejectattr('authorized_keys', 'defined') | rejectattr('file', 'defined') | list}}"
+  loop: "{{_pod_configmaps | rejectattr('authorized_keys', 'defined') | rejectattr('file', 'defined') | rejectattr('template', 'defined') | list}}"
   loop_control:
     loop_var: _configmap
     label: "{{_configmap.name}}"
 
-- name: create authorized_keys ConfigMaps for pod
+- name: "create authorized_keys ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -77,7 +77,7 @@
     _ak_use_management: "{{_ak_cm.authorized_keys.management | default(false)}}"
     _ak_key_names: "{{_ak_cm.authorized_keys.key_names | default([])}}"
 
-- name: create file-backed ConfigMaps for pod
+- name: "create file-backed ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -89,7 +89,7 @@
     loop_var: _file_cm
     label: "{{_file_cm.name}}"
 
-- name: create template-backed ConfigMaps for pod
+- name: "create template-backed ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -101,14 +101,14 @@
     loop_var: _template_cm
     label: "{{_template_cm.name}}"
 
-- name: generate Secrets for pod
+- name: "generate Secrets for pod ({{_pod_name}})"
   include_tasks: generate_ssh_host_key_secret.yml
   loop: "{{_pod_secrets | selectattr('generate', 'defined') | list}}"
   loop_control:
     loop_var: _gen_secret
     label: "{{_gen_secret.name}}"
 
-- name: create PersistentVolumeClaims for pod volumes
+- name: "create PersistentVolumeClaims for pod volumes ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -119,7 +119,7 @@
     label: "{{_pvc.name}}"
   when: _pvc.persistentVolumeClaim is defined
 
-- name: push workload template for debug
+- name: "push workload template for debug ({{_pod_name}})"
   become: false
   connection: local
   local_action:
@@ -129,7 +129,7 @@
     dest: "{{_k3s_debug_path}}/{{_pod_name}}-{{_pod_workload_type | lower}}.yaml"
   when: _k3s_debug_path is defined and not _pod_manifest
 
-- name: push raw manifest for debug
+- name: "push raw manifest for debug ({{_pod_name}})"
   become: false
   connection: local
   copy:
@@ -138,7 +138,7 @@
     dest: "{{_k3s_debug_path}}/{{_pod_name}}-manifest.yaml"
   when: _k3s_debug_path is defined and _pod_manifest
 
-- name: deploy workload from template
+- name: "deploy workload from template ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -146,7 +146,7 @@
     definition: "{{lookup('template', 'pod-deployment.yml.j2')}}"
   when: not _pod_manifest and _pod_containers | length > 0
 
-- name: apply raw workload manifest
+- name: "apply raw workload manifest ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -154,7 +154,7 @@
     definition: "{{_pod_manifest}}"
   when: _pod_manifest
 
-- name: warn if no containers or manifest defined
+- name: "warn if no containers or manifest defined ({{_pod_name}})"
   debug:
     msg: "WARNING: pod {{_pod_name}} has neither pod.containers nor pod.manifest defined, skipping workload deployment"
   when: not _pod_manifest and _pod_containers | length == 0
@@ -162,7 +162,7 @@
 # ConfigMaps mounted via subPath are not updated automatically in running pods.
 # Patch the workload with a restart timestamp to trigger a rolling update whenever
 # any such ConfigMap content changes (authorized_keys or inline data configmaps).
-- name: rollout restart workload if subPath-mounted ConfigMap changed
+- name: "rollout restart workload if subPath-mounted ConfigMap changed ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: patched
@@ -184,7 +184,7 @@
 # Deployment update so the rolling update has already removed the volumeMount
 # from the pod spec.  The pvc-protection finalizer ensures K8s won't actually
 # delete a PVC until all pods have released it, so there is no data-loss race.
-- name: query ansible-managed PVCs for this pod
+- name: "query ansible-managed PVCs for this pod ({{_pod_name}})"
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
     kind: PersistentVolumeClaim
@@ -194,7 +194,7 @@
       - "configurator=ansible"
   register: _existing_pod_pvcs
 
-- name: build expected PVC names from current volume config
+- name: "build expected PVC names from current volume config ({{_pod_name}})"
   set_fact:
     _expected_pvc_names: >-
       {{ _pod_volumes
@@ -202,7 +202,7 @@
          | map(attribute='persistentVolumeClaim.claimName')
          | list }}
 
-- name: remove stale PersistentVolumeClaims
+- name: "remove stale PersistentVolumeClaims ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
@@ -217,7 +217,7 @@
     label: "{{item.metadata.name}}"
   when: item.metadata.name not in _expected_pvc_names
 
-- name: query ansible-managed ConfigMaps for this pod
+- name: "query ansible-managed ConfigMaps for this pod ({{_pod_name}})"
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
     kind: ConfigMap
@@ -227,12 +227,12 @@
       - "configurator=ansible"
   register: _existing_pod_configmaps
 
-- name: build expected ConfigMap names from current config
+- name: "build expected ConfigMap names from current config ({{_pod_name}})"
   set_fact:
     _expected_configmap_names: >-
       {{ _pod_configmaps | map(attribute='name') | list }}
 
-- name: remove stale ConfigMaps
+- name: "remove stale ConfigMaps ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
@@ -247,7 +247,7 @@
     label: "{{item.metadata.name}}"
   when: item.metadata.name not in _expected_configmap_names
 
-- name: query ansible-managed Secrets for this pod
+- name: "query ansible-managed Secrets for this pod ({{_pod_name}})"
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
     kind: Secret
@@ -257,12 +257,12 @@
       - "configurator=ansible"
   register: _existing_pod_secrets
 
-- name: build expected Secret names from current config
+- name: "build expected Secret names from current config ({{_pod_name}})"
   set_fact:
     _expected_secret_names: >-
       {{ _pod_secrets | map(attribute='name') | list }}
 
-- name: remove stale Secrets
+- name: "remove stale Secrets ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
@@ -281,7 +281,7 @@
 # format migrations (e.g. deprecated metallb annotations) in a single pass.
 # Services are deleted unconditionally if stale, or if they carry a deprecated
 # annotation that would conflict with the current spec format.
-- name: query existing ansible-managed services for this pod
+- name: "query existing ansible-managed services for this pod ({{_pod_name}})"
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
     kind: Service
@@ -291,7 +291,7 @@
       - "configurator=ansible"
   register: _existing_pod_services
 
-- name: build expected service names from current network config
+- name: "build expected service names from current network config ({{_pod_name}})"
   set_fact:
     _expected_service_names: >-
       {{ _pod_networks | dict2items
@@ -304,7 +304,7 @@
 # deprecated spec.loadBalancerIP field instead of the metallb annotation.
 # Server-side apply handles port protocol conflicts (UDP+TCP on same port)
 # correctly, but requires a clean slate when migrating from loadBalancerIP.
-- name: remove stale or format-migrating LoadBalancer services
+- name: "remove stale or format-migrating LoadBalancer services ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: absent
@@ -326,7 +326,7 @@
 #   ports:  explicit list on the interface itself (use with pod.manifest)
 #   links:  list of container names; ports collected from each (simple mode)
 #   link:   single container name; ports collected from it (simple mode)
-- name: deploy LoadBalancer service for external IP
+- name: "deploy LoadBalancer service for external IP ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -347,7 +347,7 @@
      (_network_iface.value.links is defined and
       _network_iface.value.links | length > 0))
 
-- name: note interfaces without port configuration
+- name: "note interfaces without port configuration ({{_pod_name}})"
   debug:
     msg: "Interface {{_network_iface.key}} on pod {{_pod_name}} has no port configuration in container {{_network_iface.value.link|default('(no link)')}}, skipping LoadBalancer service"
   with_dict: "{{_pod_networks}}"
