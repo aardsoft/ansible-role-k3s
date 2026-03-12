@@ -17,7 +17,7 @@
   ansible.builtin.shell: "{{_k3s_installer}}"
   environment:
     INSTALL_K3S_EXEC: "{{_k3s_args}}"
-    INSTALL_K3S_CHANNEL: "{{_k3s_cfg.channel | default(omit)}}"
+    INSTALL_K3S_CHANNEL: "{{_k3s_cfg.channel | default('stable')}}"
   register: _master_install_status
 
 - name: Reboot transactional system
