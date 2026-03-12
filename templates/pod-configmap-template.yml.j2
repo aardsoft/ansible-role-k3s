@@ -13,6 +13,10 @@ metadata:
 data:
 {% for key, path in _template_cm.template.items() %}
   {{key}}: |
+{% if path is mapping %}
+{{ lookup('role_template', path.template, role=path.role) | indent(4, first=True) }}
+{% else %}
 {% set _cm_path = path if path.startswith('/') else playbook_dir + '/' + path %}
 {{ lookup('template', _cm_path) | indent(4, first=True) }}
+{% endif %}
 {% endfor %}
