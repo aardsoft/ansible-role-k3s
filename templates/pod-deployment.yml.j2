@@ -13,6 +13,11 @@ metadata:
 spec:
 {% if _pod_workload_type == 'Deployment' %}
   replicas: 1
+  strategy:
+    type: {{_pod_workload_strategy | default('RollingUpdate')}}
+{% if (_pod_workload_strategy | default('RollingUpdate')) == 'Recreate' %}
+    rollingUpdate: null
+{% endif %}
 {% endif %}
   selector:
     matchLabels:
