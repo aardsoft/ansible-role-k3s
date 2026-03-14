@@ -43,6 +43,22 @@
 - include_tasks: k3s_setup.yml
   when: _k3s_cfg is defined
 
+# Write Traefik HelmChartConfig on all server nodes as soon as the traefik key
+# is defined so entrypoints and TLS are in place before other deployments run.
+# File is written to every server node; kubectl apply is gated to first server
+# only (in manage_server_manifest.yml).
+- name: manage Traefik configuration manifest
+  include_tasks: manage_server_manifest.yml
+  vars:
+    _manifest:
+      key: traefik-ansible-label.yaml
+      value:
+        template: traefik-ansible-label.j2
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.traefik is defined and
+    k3s_role|default('agent') == 'server'
+
 # for leap we don't have the multiple python versions yet, so just stick
 # with the generic 3 package
 - set_fact:

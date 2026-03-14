@@ -56,7 +56,7 @@
 - name: kubectl apply server manifest when changed
   ansible.builtin.command:
     cmd: kubectl --kubeconfig {{_k3s_kubecfg}} apply -f /var/lib/rancher/k3s/server/manifests/{{_manifest.key}}
-  when: _manifest_result is changed
+  when: _manifest_result is changed and _first_server | default(false)
 
 - name: check if server manifest exists before removal
   ansible.builtin.stat:
