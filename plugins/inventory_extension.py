@@ -162,20 +162,26 @@ class InventoryExtension:
 
     def _resolve_cluster_ssh(self, plugin, hosts, pod_host):
         ''' Resolve the SSH address of the k3s cluster host for a k3s-pod.
+
+        Checks k3s.cluster_host first (explicit SSH target host), then falls
+        back to k3s.cluster for backwards compatibility with configurations
+        where the cluster value was the first-server inventory hostname.
+
         Returns the SSH address string, or None if not determinable. '''
 
         k3s_cfg = pod_host.get('k3s')
         if not k3s_cfg or not isinstance(k3s_cfg, dict):
             return None
 
-        cluster_name = k3s_cfg.get('cluster')
-        if not cluster_name:
+        # Prefer explicit cluster_host; fall back to cluster name as hostname
+        ssh_host_name = k3s_cfg.get('cluster_host') or k3s_cfg.get('cluster')
+        if not ssh_host_name:
             return None
 
-        if cluster_name not in hosts:
+        if ssh_host_name not in hosts:
             return None
 
-        cluster_host = hosts[cluster_name]
+        cluster_host = hosts[ssh_host_name]
 
         # Try host_vars.ansible_host first - most explicit setting
         host_vars = cluster_host.get('host_vars')
@@ -194,12 +200,12 @@ class InventoryExtension:
                 if ipv4:
                     return re.sub(r'/.*$', '', ipv4)
 
-        # Last resort: use the cluster hostname itself (may be DNS-resolvable)
+        # Last resort: use the resolved host name itself (may be DNS-resolvable)
         plugin.display.warning(
             "k3s-pod '%s': cluster host '%s' has no ansible_host or network IP; "
             "falling back to inventory hostname as SSH address" % (
-                pod_host.get('hostname', '?'), cluster_name))
-        return cluster_name
+                pod_host.get('hostname', '?'), ssh_host_name))
+        return ssh_host_name
 
     # ------------------------------------------------------------------
     # Lifecycle hooks
@@ -274,9 +280,17 @@ class InventoryExtension:
                 parser['errors'].append(
                     "%s: k3s-pod type requires pod.containers to be defined" % host)
 
-        if k3s_cfg.get('cluster') and k3s_cfg['cluster'] not in hosts:
+        cluster_host = k3s_cfg.get('cluster_host')
+        if cluster_host and cluster_host not in hosts:
             parser['errors'].append(
-                "%s: k3s.cluster '%s' not found in hosts" % (host, k3s_cfg['cluster']))
+                "%s: k3s.cluster_host '%s' not found in hosts" % (host, cluster_host))
+        elif not cluster_host and k3s_cfg.get('cluster') and k3s_cfg['cluster'] not in hosts:
+            # cluster used as SSH host (legacy); warn but don't error since it
+            # may be a logical cluster name rather than an inventory hostname
+            plugin.display.warning(
+                "%s: k3s.cluster '%s' not found in hosts — if this is a logical "
+                "cluster name, set k3s.cluster_host for SSH resolution" % (
+                    host, k3s_cfg['cluster']))
 
     def setup_host(self, plugin, host, host_def, groups, data, valid_keys, parser):
         ''' Non-dryrun host setup: set connection vars and create per-container

@@ -5,8 +5,9 @@
     loop_var: _pod
   when: >
     _pod.value.type is defined and _pod.value.type == "k3s-pod" and
-    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == inventory_hostname) and
-    (_pod.value.k3s.state is undefined or _pod.value.k3s.state != "absent")
+    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == k3s_cluster) and
+    (_pod.value.k3s.state is undefined or _pod.value.k3s.state != "absent") and
+    (k3s_pod_limit is undefined or _pod.key in (k3s_pod_limit.split(',') if k3s_pod_limit is string else k3s_pod_limit))
 
 - name: destroy absent pods
   include_tasks: destroy_pod.yml
@@ -15,5 +16,6 @@
     loop_var: _pod
   when: >
     _pod.value.type is defined and _pod.value.type == "k3s-pod" and
-    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == inventory_hostname) and
-    _pod.value.k3s.state is defined and _pod.value.k3s.state == "absent"
+    (_pod.value.k3s.cluster is undefined or _pod.value.k3s.cluster == k3s_cluster) and
+    _pod.value.k3s.state is defined and _pod.value.k3s.state == "absent" and
+    (k3s_pod_limit is undefined or _pod.key in (k3s_pod_limit.split(',') if k3s_pod_limit is string else k3s_pod_limit))

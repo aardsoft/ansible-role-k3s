@@ -12,19 +12,13 @@
 
 - name: load k3s config from k3s_clusters variable
   set_fact:
-    _k3s_cfg: "{{k3s_clusters[k3s_cluster]}}"
+    _k3s_cfg: "{{k3s_clusters[k3s_cluster] if k3s_clusters[k3s_cluster] is mapping else vars[k3s_clusters[k3s_cluster]]}}"
   when: >
     _k3s_cfg is undefined and
     k3s_cluster is defined and
     k3s_clusters is defined and
     k3s_clusters[k3s_cluster] is defined
 
-- name: load k3s config from k3s variable
-  set_fact:
-    _k3s_cfg: "{{k3s}}"
-  when: >
-    _k3s_cfg is undefined and
-    k3s is defined
 
 - name: set kubeconfig location override
   set_fact:
