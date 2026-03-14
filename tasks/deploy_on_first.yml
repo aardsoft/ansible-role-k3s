@@ -67,4 +67,4 @@
 
 - name: manage k3s pods
   include_tasks: manage_pods.yml
-  when: network_pods is defined and network_pods | length > 0
+  when: network_pods is defined
