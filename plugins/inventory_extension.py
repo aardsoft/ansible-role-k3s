@@ -26,6 +26,7 @@ import os
 import re
 
 from ansible.template import Templar
+from ansible.utils.unsafe_proxy import wrap_var
 
 HANDLES_TYPES = ['k3s-pod']
 
@@ -234,6 +235,32 @@ class InventoryExtension:
         data[valid_keys['hosts']][host]['pod'] = self._merge_pod_sections(
             merged_pod, host_pod)
 
+    def sanitise_host(self, plugin, host, host_def, data, k, parser):
+        ''' Normalise k3s-pod network interfaces.
+
+        Synthesizes an addresses dict from ipv4/ipv6 scalar keys on each
+        interface in pod.network if addresses is not already explicitly set.
+        This mirrors what site_yaml does for server networks keys, letting
+        complex consumers (pod-service template, etc.) always work off
+        addresses while simple roles continue using ipv4/ipv6 directly. '''
+
+        network = host_def.get('network')
+        if not network or not isinstance(network, dict):
+            return
+
+        for if_key, iface in network.items():
+            if not isinstance(iface, dict):
+                continue
+            if iface.get('addresses') is not None:
+                continue
+            synthesized = {}
+            if iface.get('ipv4') is not None:
+                synthesized[iface['ipv4']] = {}
+            if iface.get('ipv6') is not None:
+                synthesized[iface['ipv6']] = {}
+            if synthesized:
+                data[k['hosts']][host]['network'][if_key]['addresses'] = synthesized
+
     def validate_host(self, plugin, host, host_def, hosts, parser):
         ''' Dryrun validation for k3s-pod hosts. '''
 
@@ -255,8 +282,13 @@ class InventoryExtension:
         ''' Non-dryrun host setup: set connection vars and create per-container
         derived hosts.
 
-        Returns {'network_pods': {host: host_def}} so the plugin can set the
-        network_pods global variable after processing all hosts. '''
+        Returns {'network_pods': {host: wrap_var(host_def)}} so the plugin can
+        set the network_pods global variable after processing all hosts.
+        wrap_var marks all strings in host_def as AnsibleUnsafeText so that
+        Ansible does not recursively evaluate embedded Jinja2 expressions
+        (e.g. "{{ dhcpd_options.config_template }}") when building variable
+        scope for when: conditions — which would otherwise cause silent task
+        skips for all pods on the cluster host. '''
 
         hosts = data[valid_keys['hosts']]
         cluster_ssh = self._resolve_cluster_ssh(plugin, hosts, host_def)
@@ -303,4 +335,4 @@ class InventoryExtension:
             if cluster_ssh:
                 plugin.inventory.set_variable(cnt_host, 'ansible_host', '%s@%s' % (host, cluster_ssh))
 
-        return {'network_pods': {host: host_def}}
+        return {'network_pods': {host: wrap_var(host_def)}}
