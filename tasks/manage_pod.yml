@@ -44,7 +44,7 @@
     apply: yes
     definition: "{{lookup('template', 'pod-configmap.yml.j2')}}"
   register: _data_cm_results
-  loop: "{{_pod_configmaps | rejectattr('authorized_keys', 'defined') | rejectattr('file', 'defined') | rejectattr('template', 'defined') | rejectattr('passdb', 'defined') | list}}"
+  loop: "{{_pod_configmaps | rejectattr('authorized_keys', 'defined') | rejectattr('file', 'defined') | rejectattr('template', 'defined') | rejectattr('passdb', 'defined') | rejectattr('dir', 'defined') | list}}"
   loop_control:
     loop_var: _configmap
     label: "{{_configmap.name}}"
@@ -113,6 +113,18 @@
   loop_control:
     loop_var: _passdb_cm
     label: "{{_passdb_cm.name}}"
+
+- name: "create directory-backed ConfigMaps for pod ({{_pod_name}})"
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{lookup('template', 'pod-configmap-dir.yml.j2')}}"
+  register: _dir_cm_results
+  loop: "{{_pod_configmaps | selectattr('dir', 'defined') | list}}"
+  loop_control:
+    loop_var: _dir_cm
+    label: "{{_dir_cm.name}}"
 
 - name: "generate Secrets for pod ({{_pod_name}})"
   include_tasks: generate_ssh_host_key_secret.yml
@@ -191,7 +203,7 @@
   when:
     - not _pod_manifest
     - _pod_containers | length > 0
-    - (_ak_cm_results.changed | default(false)) or (_data_cm_results.changed | default(false)) or (_file_cm_results.changed | default(false)) or (_template_cm_results.changed | default(false)) or (_passdb_cm_results.changed | default(false))
+    - (_ak_cm_results.changed | default(false)) or (_data_cm_results.changed | default(false)) or (_file_cm_results.changed | default(false)) or (_template_cm_results.changed | default(false)) or (_passdb_cm_results.changed | default(false)) or (_dir_cm_results.changed | default(false))
 
 # Clean up PVCs for volumes that were removed from config. This runs after the
 # Deployment update so the rolling update has already removed the volumeMount

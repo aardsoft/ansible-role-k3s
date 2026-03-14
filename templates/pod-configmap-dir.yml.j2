@@ -1,0 +1,18 @@
+{% set _cm_dir = _dir_cm.dir if _dir_cm.dir.startswith('/') else playbook_dir + '/' + _dir_cm.dir %}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{_dir_cm.name}}
+  namespace: {{_pod_namespace}}
+  labels:
+    app: {{_pod_name}}
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+data:
+{% for _file_path in query('fileglob', _cm_dir + '/*') | sort %}
+  {{_file_path | basename}}: |
+{{ lookup('file', _file_path) | indent(4, first=True) }}
+{% endfor %}
