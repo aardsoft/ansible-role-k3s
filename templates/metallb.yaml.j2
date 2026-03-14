@@ -28,7 +28,7 @@ metadata:
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
 {% for spec in _advertisements[advertisement].spec|default({}) %}
   {{ spec }}
@@ -63,7 +63,7 @@ metadata:
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   peerAddress: {{_bgp_peers[peer].peerAddress}}
   peerASN: {{_bgp_peers[peer].peerASN|default(64512)}}

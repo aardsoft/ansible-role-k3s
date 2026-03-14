@@ -34,6 +34,12 @@
       metadata:
         name: hello-world
         namespace: "{{k3s_test_namespace}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
       data:
         check: "{{k3s_rand|default('NA')}}"
         index.html: |
@@ -54,8 +60,13 @@
       metadata:
         namespace: "{{k3s_test_namespace}}"
         name: hello-world
+        labels:
+          configurator: ansible
         annotations:
           kubernetes.io/ingress.class: "traefik"
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
       spec:
         rules:
         - host: "hw-{{k3s_rand | lower}}.test"
@@ -79,6 +90,12 @@
       metadata:
         namespace: "{{k3s_test_namespace}}"
         name: hello-world
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
       spec:
         ports:
           - port: 80
@@ -96,6 +113,12 @@
       metadata:
         namespace: "{{k3s_test_namespace}}"
         name: hello-world-nginx
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
       spec:
         selector:
           matchLabels:

@@ -10,6 +10,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector: {}
   policyTypes:
@@ -24,6 +28,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector: {}
   policyTypes:
@@ -51,6 +59,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector: {}
   policyTypes:
@@ -68,6 +80,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector: {}
   policyTypes:
@@ -87,6 +103,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector: {}
   policyTypes:
@@ -105,6 +125,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector:
     matchLabels:
@@ -130,6 +154,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector:
     matchLabels:
@@ -151,6 +179,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector:
     matchLabels:
@@ -191,6 +223,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector:
     matchLabels:
@@ -215,6 +251,10 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
 spec:
   podSelector:
     matchLabels:
