@@ -26,6 +26,7 @@
     dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
     mode: '0644'
     owner: root
+  register: _manifest_result
   when: >
     _manifest.value.state | default('present') == 'present' and
     _manifest.value.template is defined
@@ -36,6 +37,7 @@
     dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
     mode: '0644'
     owner: root
+  register: _manifest_result
   when: >
     _manifest.value.state | default('present') == 'present' and
     _manifest.value.file is defined
@@ -46,9 +48,15 @@
     dest: "/var/lib/rancher/k3s/server/manifests/{{_manifest.key}}"
     mode: '0644'
     owner: root
+  register: _manifest_result
   when: >
     _manifest.value.state | default('present') == 'present' and
     _manifest.value.content is defined
+
+- name: kubectl apply server manifest when changed
+  ansible.builtin.command:
+    cmd: kubectl --kubeconfig {{_k3s_kubecfg}} apply -f /var/lib/rancher/k3s/server/manifests/{{_manifest.key}}
+  when: _manifest_result is changed
 
 - name: check if server manifest exists before removal
   ansible.builtin.stat:
