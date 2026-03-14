@@ -18,3 +18,87 @@
     _k3s_cfg.longhorn.ui_ingress is defined and
     _k3s_cfg.longhorn.ui_ingress.metadata is defined and
     _k3s_cfg.longhorn.ui_ingress.spec is defined
+
+- name: check longhorn middleware for stale basicAuth spec
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: traefik.io/v1alpha1
+    kind: Middleware
+    name: management-auth
+    namespace: longhorn-system
+  register: _longhorn_mw_check
+  when: _k3s_cfg.management_hostname is defined
+
+- name: remove longhorn middleware if basicAuth spec present
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    api_version: traefik.io/v1alpha1
+    kind: Middleware
+    name: management-auth
+    namespace: longhorn-system
+  when: >
+    _k3s_cfg.management_hostname is defined and
+    (_longhorn_mw_check.resources | default([]) | length > 0) and
+    (_longhorn_mw_check.resources[0].spec.basicAuth is defined)
+
+- name: create ForwardAuth middleware for longhorn
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: traefik.io/v1alpha1
+      kind: Middleware
+      metadata:
+        name: management-auth
+        namespace: longhorn-system
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
+      spec:
+        forwardAuth:
+          address: "http://authelia.{{_k3s_cfg.management_namespace|default('management')}}.svc.cluster.local:9091/api/authz/forward-auth"
+          authResponseHeaders:
+            - X-Forwarded-User
+          trustForwardHeader: true
+  when: _k3s_cfg.management_hostname is defined
+
+- name: create longhorn-ui management ingress
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: Ingress
+      metadata:
+        name: longhorn-ui-management
+        namespace: longhorn-system
+        labels:
+          configurator: ansible
+        annotations:
+          traefik.ingress.kubernetes.io/router.entrypoints: "{{_k3s_cfg.management_entrypoint|default('management')}},{{_k3s_cfg.management_entrypoint|default('management')}}-secure"
+          traefik.ingress.kubernetes.io/router.middlewares: "longhorn-system-management-auth@kubernetescrd"
+          forecastle.stakater.com/expose: "true"
+          forecastle.stakater.com/appName: "Longhorn Storage"
+          forecastle.stakater.com/group: "Storage"
+          forecastle.stakater.com/url: "https://longhorn.{{_k3s_cfg.management_hostname}}"
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
+      spec:
+        rules:
+          - host: "longhorn.{{_k3s_cfg.management_hostname}}"
+            http:
+              paths:
+                - path: /
+                  pathType: Prefix
+                  backend:
+                    service:
+                      name: longhorn-frontend
+                      port:
+                        number: 80
+  when: _k3s_cfg.management_hostname is defined

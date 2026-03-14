@@ -5,6 +5,87 @@ metadata:
   namespace: kube-system
 spec:
   valuesContent: |-
+    providers:
+      kubernetesCRD:
+        allowCrossNamespace: true
     deployment:
       podLabels:
         managed-by-ansible: "true"
+{% if _k3s_cfg.traefik is defined and _k3s_cfg.traefik.entrypoints is defined %}
+    ports:
+      web:
+        expose:
+          default: false
+      websecure:
+        expose:
+          default: false
+{% for ep_name, ep in _k3s_cfg.traefik.entrypoints.items() | sort if ep.primary | default(false) %}
+      {{ep_name}}:
+        port: 10080
+        exposedPort: 80
+        expose:
+          default: true
+      {{ep_name}}-secure:
+        port: 10443
+        exposedPort: 443
+        tls:
+          enabled: true
+        expose:
+          default: true
+{% endfor %}
+{% for ep_name, ep in _k3s_cfg.traefik.entrypoints.items() | sort if not ep.primary | default(false) %}
+      {{ep_name}}:
+        port: {{11080 + loop.index0 * 1000}}
+        exposedPort: 80
+        expose:
+          default: false
+      {{ep_name}}-secure:
+        port: {{11443 + loop.index0 * 1000}}
+        exposedPort: 443
+        tls:
+          enabled: true
+        expose:
+          default: false
+{% endfor %}
+{% for ep_name, ep in _k3s_cfg.traefik.entrypoints.items() | sort if ep.primary | default(false) %}
+    service:
+      annotations:
+        metallb.universe.tf/loadBalancerIPs: "{{ep.ip}}"
+{% if ep.ipv6 is not defined %}
+      ipFamilyPolicy: SingleStack
+      ipFamilies:
+        - IPv4
+{% endif %}
+{% endfor %}
+{% for ep_name, ep in _k3s_cfg.traefik.entrypoints.items() | sort if not ep.primary | default(false) %}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: traefik-{{ep_name}}
+  namespace: kube-system
+  annotations:
+    metallb.universe.tf/loadBalancerIPs: "{{ep.ip}}{% if ep.ipv6 is defined %},{{ep.ipv6}}{% endif %}"
+spec:
+  selector:
+    app.kubernetes.io/instance: traefik-kube-system
+    app.kubernetes.io/name: traefik
+  type: LoadBalancer
+{% if ep.ipv6 is defined %}
+  ipFamilyPolicy: PreferDualStack
+{% else %}
+  ipFamilyPolicy: SingleStack
+  ipFamilies:
+    - IPv4
+{% endif %}
+  ports:
+  - name: web
+    port: 80
+    targetPort: {{ep_name}}
+    protocol: TCP
+  - name: websecure
+    port: 443
+    targetPort: {{ep_name}}-secure
+    protocol: TCP
+{% endfor %}
+{% endif %}
