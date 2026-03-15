@@ -81,6 +81,7 @@
           configurator: ansible
         annotations:
           traefik.ingress.kubernetes.io/router.entrypoints: "{{_k3s_cfg.management_entrypoint|default('management')}},{{_k3s_cfg.management_entrypoint|default('management')}}-secure"
+          traefik.ingress.kubernetes.io/router.tls: "true"
           traefik.ingress.kubernetes.io/router.middlewares: "longhorn-system-management-auth@kubernetescrd"
           forecastle.stakater.com/expose: "true"
           forecastle.stakater.com/appName: "Longhorn Storage"
