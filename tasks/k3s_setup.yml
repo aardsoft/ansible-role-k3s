@@ -57,6 +57,13 @@
     mode: 0755
     owner: root
 
+- name: copy k3s-nettest script
+  ansible.builtin.copy:
+    src: k3s-nettest.sh
+    dest: "{{local_bin|default('/usr/local/bin')}}/k3s-nettest"
+    mode: 0755
+    owner: root
+
 - name: create k3s.service.d
   ansible.builtin.file:
     state: directory
@@ -70,7 +77,7 @@
     mode: 0700
     owner: root
     path: /etc/rancher/k3s
-  when: _k3s_cfg.use_config_file | default(false)
+  when: _k3s_cfg.use_config_file | default(false) or _k3s_cfg.registries is defined
 
 - name: copy longhorn environment check
   ansible.builtin.copy:
@@ -247,6 +254,22 @@
   register: _dropin_status
   when: not (_k3s_cfg.use_config_file | default(false))
 
+- name: write k3s registries.yaml
+  ansible.builtin.template:
+    src: registries.yaml.j2
+    dest: /etc/rancher/k3s/registries.yaml
+    mode: "0600"
+    owner: root
+  register: _k3s_registries_written
+  when: _k3s_cfg.registries is defined
+
+- name: remove k3s registries.yaml
+  ansible.builtin.file:
+    path: /etc/rancher/k3s/registries.yaml
+    state: absent
+  register: _k3s_registries_removed
+  when: _k3s_cfg.registries is not defined
+
 - name: restart k3s
   ansible.builtin.systemd_service:
     name: k3s
@@ -254,7 +277,9 @@
     state: restarted
   when: >
     (_dropin_status is defined and _dropin_status is changed) or
-    (_k3s_config_status is defined and _k3s_config_status is changed)
+    (_k3s_config_status is defined and _k3s_config_status is changed) or
+    (_k3s_registries_written is defined and _k3s_registries_written is changed) or
+    (_k3s_registries_removed is defined and _k3s_registries_removed is changed)
   ignore_errors: true
 
 - name: setup master
