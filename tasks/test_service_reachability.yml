@@ -3,6 +3,9 @@
     kubeconfig: "{{_k3s_kubecfg}}"
     kind: Node
   register: _cluster_nodes
+  until: _cluster_nodes is not failed
+  retries: 30
+  delay: 10
 
 - name: get kubernetes service ClusterIPs
   kubernetes.core.k8s_info:
