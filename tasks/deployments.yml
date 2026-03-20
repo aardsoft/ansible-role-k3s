@@ -5,8 +5,7 @@
 
 # TODO: also support loading from a variable, template or file
 - set_fact:
-    _deployment_values: "{{_deployment.value.config}}"
-  when: _deployment.value.config is defined
+    _deployment_values: "{{_deployment.value.config | default({})}}"
 
 - include_role:
     tasks_from: "deploy-{{_deployment_name}}"

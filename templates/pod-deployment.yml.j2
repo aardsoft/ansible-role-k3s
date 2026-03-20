@@ -24,6 +24,10 @@ spec:
       app: {{_pod_name}}
   template:
     metadata:
+      annotations:
+        ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+        ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+        ansible.version: "{{ansible_version.full}}"
       labels:
         app: {{_pod_name}}
 {% if _pod_labels is defined %}

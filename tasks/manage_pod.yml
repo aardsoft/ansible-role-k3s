@@ -7,7 +7,7 @@
     _pod_namespace: "{{(_pod.value.k3s|default({})).namespace|default(_pod.key)}}"
     _pod_containers: "{{(_pod.value.pod|default({})).containers|default({})}}"
     _pod_networks: "{{_pod.value.network|default({})}}"
-    _pod_labels: "{{(_pod.value.k3s|default({})).labels|default({})}}"
+    _pod_labels: "{{((_pod.value.k3s|default({})).labels|default({})) | combine(_pod.value.k3s|default({}) | k3s_np_labels)}}"
     _pod_volumes: "{{(_pod.value.pod|default({})).volumes|default([])}}"
     _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
     _pod_workload_strategy: "{{(_pod.value.k3s|default({})).workload_strategy|default('RollingUpdate')}}"
@@ -19,12 +19,22 @@
     _pod_manifest: "{{(_pod.value.pod|default({})).manifest|default(false)}}"
     _pod_selector: "{{(_pod.value.k3s|default({})).selector|default({'app': _pod.key})}}"
 
+- name: "get current namespace ({{_pod_name}})"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: "{{_pod_namespace}}"
+  register: _current_pod_namespace
+  when: _pod_namespace != 'default'
+
 - name: "create namespace ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
-    definition:
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: v1
       kind: Namespace
       metadata:
@@ -35,7 +45,29 @@
           ansible.run-id: "{{ansible_run_id|default('N/A')}}"
           ansible.config_file: "{{ansible_config_file|default('N/A')}}"
           ansible.version: "{{ansible_version.full}}"
-  when: _pod_namespace != 'default'
+  when: >
+    _pod_namespace != 'default' and
+    _desired | k3s_content_changed((_current_pod_namespace.resources | default([]))[0] | default(none))
+
+# Pre-fetch all existing ConfigMaps for this pod once.  Used for both
+# content-change comparison below (to avoid spurious pod restarts from
+# volatile annotation diffs) and for stale cleanup at the end of this file.
+- name: "query existing ConfigMaps for this pod ({{_pod_name}})"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: ConfigMap
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_configmaps
+
+- name: "index existing ConfigMaps by name ({{_pod_name}})"
+  set_fact:
+    _existing_cm_index: >-
+      {{ dict(_existing_pod_configmaps.resources
+              | map(attribute='metadata.name')
+              | zip(_existing_pod_configmaps.resources)) }}
 
 - name: "create ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -48,6 +80,9 @@
   loop_control:
     loop_var: _configmap
     label: "{{_configmap.name}}"
+  vars:
+    _current_cm: "{{ _existing_cm_index[_configmap.name] if _configmap.name in _existing_cm_index else none }}"
+  when: lookup('template', 'pod-configmap.yml.j2') | from_yaml | k3s_content_changed(_current_cm)
 
 - name: "create authorized_keys ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -77,6 +112,13 @@
   vars:
     _ak_use_management: "{{_ak_cm.authorized_keys.management | default(false)}}"
     _ak_key_names: "{{_ak_cm.authorized_keys.key_names | default([])}}"
+    _current_cm: "{{ _existing_cm_index[_ak_cm.name] if _ak_cm.name in _existing_cm_index else none }}"
+  when: >-
+    {'apiVersion': 'v1', 'kind': 'ConfigMap',
+     'metadata': {'name': _ak_cm.name, 'namespace': _pod_namespace,
+                  'labels': {'app': _pod_name, 'configurator': 'ansible'}},
+     'data': {'authorized_keys': lookup('template', 'pod-authorized-keys.j2')}}
+    | k3s_content_changed(_current_cm)
 
 - name: "create file-backed ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -89,6 +131,9 @@
   loop_control:
     loop_var: _file_cm
     label: "{{_file_cm.name}}"
+  vars:
+    _current_cm: "{{ _existing_cm_index[_file_cm.name] if _file_cm.name in _existing_cm_index else none }}"
+  when: lookup('template', 'pod-configmap-file.yml.j2') | from_yaml | k3s_content_changed(_current_cm)
 
 - name: "create template-backed ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -101,6 +146,9 @@
   loop_control:
     loop_var: _template_cm
     label: "{{_template_cm.name}}"
+  vars:
+    _current_cm: "{{ _existing_cm_index[_template_cm.name] if _template_cm.name in _existing_cm_index else none }}"
+  when: lookup('template', 'pod-configmap-template.yml.j2') | from_yaml | k3s_content_changed(_current_cm)
 
 - name: "create passdb ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -113,6 +161,9 @@
   loop_control:
     loop_var: _passdb_cm
     label: "{{_passdb_cm.name}}"
+  vars:
+    _current_cm: "{{ _existing_cm_index[_passdb_cm.name] if _passdb_cm.name in _existing_cm_index else none }}"
+  when: lookup('template', 'pod-configmap-passdb.yml.j2') | from_yaml | k3s_content_changed(_current_cm)
 
 - name: "create directory-backed ConfigMaps for pod ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -125,6 +176,9 @@
   loop_control:
     loop_var: _dir_cm
     label: "{{_dir_cm.name}}"
+  vars:
+    _current_cm: "{{ _existing_cm_index[_dir_cm.name] if _dir_cm.name in _existing_cm_index else none }}"
+  when: lookup('template', 'pod-configmap-dir.yml.j2') | from_yaml | k3s_content_changed(_current_cm)
 
 - name: "generate Secrets for pod ({{_pod_name}})"
   include_tasks: generate_ssh_host_key_secret.yml
@@ -133,16 +187,39 @@
     loop_var: _gen_secret
     label: "{{_gen_secret.name}}"
 
+- name: "query existing PVCs for this pod ({{_pod_name}})"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: PersistentVolumeClaim
+    namespace: "{{_pod_namespace}}"
+    label_selectors:
+      - "app={{_pod_name}}"
+      - "configurator=ansible"
+  register: _existing_pod_pvcs
+
+- name: "index existing PVCs by name ({{_pod_name}})"
+  set_fact:
+    _existing_pvc_index: >-
+      {{ dict(_existing_pod_pvcs.resources
+              | map(attribute='metadata.name')
+              | zip(_existing_pod_pvcs.resources)) }}
+
 - name: "create PersistentVolumeClaims for pod volumes ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
+    apply: yes
     definition: "{{lookup('template', 'pod-pvc.yml.j2')}}"
   loop: "{{_pod_volumes}}"
   loop_control:
     loop_var: _pvc
     label: "{{_pvc.name}}"
-  when: _pvc.persistentVolumeClaim is defined
+  vars:
+    _pvc_name: "{{_pvc.persistentVolumeClaim.claimName}}"
+    _current_pvc: "{{ _existing_pvc_index[_pvc_name] if _pvc_name in _existing_pvc_index else none }}"
+  when: >
+    _pvc.persistentVolumeClaim is defined and
+    (lookup('template', 'pod-pvc.yml.j2') | from_yaml | k3s_content_changed(_current_pvc))
 
 - name: "push workload template for debug ({{_pod_name}})"
   become: false
@@ -152,6 +229,7 @@
     mode: 0600
     src: pod-deployment.yml.j2
     dest: "{{_k3s_debug_path}}/{{_pod_name}}-{{_pod_workload_type | lower}}.yaml"
+  changed_when: false
   when: _k3s_debug_path is defined and not _pod_manifest
 
 - name: "push raw manifest for debug ({{_pod_name}})"
@@ -161,7 +239,18 @@
     mode: 0600
     content: "{{_pod_manifest | to_nice_yaml}}"
     dest: "{{_k3s_debug_path}}/{{_pod_name}}-manifest.yaml"
+  changed_when: false
   when: _k3s_debug_path is defined and _pod_manifest
+
+- name: "get current workload ({{_pod_name}})"
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: apps/v1
+    kind: "{{_pod_workload_type}}"
+    name: "{{_pod_name}}"
+    namespace: "{{_pod_namespace}}"
+  register: _current_pod_workload
+  when: not _pod_manifest and _pod_containers | length > 0
 
 - name: "deploy workload from template ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -169,7 +258,10 @@
     state: present
     apply: yes
     definition: "{{lookup('template', 'pod-deployment.yml.j2')}}"
-  when: not _pod_manifest and _pod_containers | length > 0
+  when: >
+    not _pod_manifest and _pod_containers | length > 0 and
+    (lookup('template', 'pod-deployment.yml.j2') | from_yaml
+     | k3s_content_changed((_current_pod_workload.resources | default([]))[0] | default(none)))
 
 - name: "apply raw workload manifest ({{_pod_name}})"
   kubernetes.core.k8s:
@@ -209,16 +301,6 @@
 # Deployment update so the rolling update has already removed the volumeMount
 # from the pod spec.  The pvc-protection finalizer ensures K8s won't actually
 # delete a PVC until all pods have released it, so there is no data-loss race.
-- name: "query ansible-managed PVCs for this pod ({{_pod_name}})"
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{_k3s_kubecfg}}"
-    kind: PersistentVolumeClaim
-    namespace: "{{_pod_namespace}}"
-    label_selectors:
-      - "app={{_pod_name}}"
-      - "configurator=ansible"
-  register: _existing_pod_pvcs
-
 - name: "build expected PVC names from current volume config ({{_pod_name}})"
   set_fact:
     _expected_pvc_names: >-
@@ -241,16 +323,6 @@
   loop_control:
     label: "{{item.metadata.name}}"
   when: item.metadata.name not in _expected_pvc_names
-
-- name: "query ansible-managed ConfigMaps for this pod ({{_pod_name}})"
-  kubernetes.core.k8s_info:
-    kubeconfig: "{{_k3s_kubecfg}}"
-    kind: ConfigMap
-    namespace: "{{_pod_namespace}}"
-    label_selectors:
-      - "app={{_pod_name}}"
-      - "configurator=ansible"
-  register: _existing_pod_configmaps
 
 - name: "build expected ConfigMap names from current config ({{_pod_name}})"
   set_fact:
@@ -316,6 +388,13 @@
       - "configurator=ansible"
   register: _existing_pod_services
 
+- name: "index existing services by name ({{_pod_name}})"
+  set_fact:
+    _existing_svc_index: >-
+      {{ dict(_existing_pod_services.resources
+              | map(attribute='metadata.name')
+              | zip(_existing_pod_services.resources)) }}
+
 - name: "build expected service names from current network config ({{_pod_name}})"
   set_fact:
     _expected_service_names: >-
@@ -327,8 +406,7 @@
 
 # Delete services that are stale (removed from config) or that use the
 # deprecated spec.loadBalancerIP field instead of the metallb annotation.
-# Server-side apply handles port protocol conflicts (UDP+TCP on same port)
-# correctly, but requires a clean slate when migrating from loadBalancerIP.
+# Requires a clean slate when migrating from loadBalancerIP.
 - name: "remove stale or format-migrating LoadBalancer services ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -355,10 +433,11 @@
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    server_side_apply:
-      field_manager: ansible
-      force_conflicts: true
+    apply: yes
     definition: "{{lookup('template', 'pod-service.yml.j2')}}"
+  vars:
+    _svc_name: "{{_pod_name}}-{{_network_iface.key}}"
+    _current_svc: "{{ _existing_svc_index[_svc_name] if _svc_name in _existing_svc_index else none }}"
   with_dict: "{{_pod_networks}}"
   loop_control:
     loop_var: _network_iface
@@ -370,7 +449,8 @@
       _network_iface.value.link in _pod_containers and
       (_pod_containers[_network_iface.value.link].ports | default([])) | length > 0) or
      (_network_iface.value.links is defined and
-      _network_iface.value.links | length > 0))
+      _network_iface.value.links | length > 0)) and
+    (lookup('template', 'pod-service.yml.j2') | from_yaml | k3s_content_changed(_current_svc))
 
 - name: "note interfaces without port configuration ({{_pod_name}})"
   debug:

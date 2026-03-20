@@ -19,6 +19,7 @@
       {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
           _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
          | items2dict }}
+  changed_when: false
   when: _k3s_debug_path is defined
 
 - name: push metallb config template (absent)
@@ -33,6 +34,7 @@
     _pools: "{{_k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
     _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
     _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+  changed_when: false
   when: _k3s_debug_path is defined
 
 - name: deploy metallb
@@ -68,12 +70,34 @@
     (_advertisements | length > 0) or
     (_bgp_peers | length > 0)
 
-- name: deploy metallb pools
-  kubernetes.core.k8s:
+- name: query ansible-managed metallb resources
+  kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
-    state: present
-    apply: yes
-    definition: "{{lookup('template', 'metallb.yaml.j2')}}"
+    api_version: "metallb.io/v1beta1"
+    kind: "{{_metallb_kind}}"
+    namespace: metallb-system
+    label_selectors:
+      - "configurator=ansible"
+  loop:
+    - IPAddressPool
+    - L2Advertisement
+    - BGPAdvertisement
+    - BGPPeer
+  loop_control:
+    loop_var: _metallb_kind
+  register: _metallb_existing_query
+
+- name: index ansible-managed metallb resources by kind/name
+  set_fact:
+    _metallb_existing: >-
+      {{ _metallb_existing_query.results
+         | map(attribute='resources') | flatten
+         | k3s_resource_index }}
+
+# the template produces a collection of documents, so split it up into a list...
+- name: build desired metallb resources
+  set_fact:
+    _metallb_desired: "{{ lookup('template', 'metallb.yaml.j2') | from_yaml_all | select('mapping') | list }}"
   vars:
     _pools: >-
       {{ (_k3s_cfg.metallb.pools|default({})|dict2items|rejectattr('value.state','defined')|list +
@@ -87,3 +111,17 @@
       {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
           _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
          | items2dict }}
+
+# .. and loop over it to check for each element if we need to apply a changei
+- name: deploy metallb pools
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_metallb_resource}}"
+  loop: "{{_metallb_desired}}"
+  loop_control:
+    loop_var: _metallb_resource
+  when: >
+    _metallb_resource | k3s_content_changed(
+      _metallb_existing[_metallb_resource.kind ~ '/' ~ _metallb_resource.metadata.name] | default(none))

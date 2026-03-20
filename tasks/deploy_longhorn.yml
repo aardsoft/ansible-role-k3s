@@ -42,11 +42,24 @@
     (_longhorn_mw_check.resources | default([]) | length > 0) and
     (_longhorn_mw_check.resources[0].spec.basicAuth is defined)
 
+- name: get current ForwardAuth middleware for longhorn
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: traefik.io/v1alpha1
+    kind: Middleware
+    name: management-auth
+    namespace: longhorn-system
+  register: _current_longhorn_mw
+  when: _k3s_cfg.management_hostname is defined
+
 - name: create ForwardAuth middleware for longhorn
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition:
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: traefik.io/v1alpha1
       kind: Middleware
       metadata:
@@ -64,6 +77,18 @@
           authResponseHeaders:
             - X-Forwarded-User
           trustForwardHeader: true
+  when: >
+    _k3s_cfg.management_hostname is defined and
+    _desired | k3s_content_changed(_current_longhorn_mw.resources[0] | default(none))
+
+- name: get current longhorn-ui management ingress
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: Ingress
+    name: longhorn-ui-management
+    namespace: longhorn-system
+  register: _current_longhorn_ingress
   when: _k3s_cfg.management_hostname is defined
 
 - name: create longhorn-ui management ingress
@@ -71,7 +96,9 @@
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
-    definition:
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: networking.k8s.io/v1
       kind: Ingress
       metadata:
@@ -102,4 +129,6 @@
                       name: longhorn-frontend
                       port:
                         number: 80
-  when: _k3s_cfg.management_hostname is defined
+  when: >
+    _k3s_cfg.management_hostname is defined and
+    _desired | k3s_content_changed(_current_longhorn_ingress.resources[0] | default(none))
