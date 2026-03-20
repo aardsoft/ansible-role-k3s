@@ -244,28 +244,49 @@ class InventoryExtension:
     def sanitise_host(self, plugin, host, host_def, data, k, parser):
         ''' Normalise k3s-pod network interfaces.
 
-        Synthesizes an addresses dict from ipv4/ipv6 scalar keys on each
-        interface in pod.network if addresses is not already explicitly set.
-        This mirrors what site_yaml does for server networks keys, letting
-        complex consumers (pod-service template, etc.) always work off
-        addresses while simple roles continue using ipv4/ipv6 directly. '''
+        1. Synthesizes an addresses dict from ipv4/ipv6 scalar keys on each
+           interface in pod.network if addresses is not already explicitly set.
+           This mirrors what site_yaml does for server networks keys, letting
+           complex consumers (pod-service template, etc.) always work off
+           addresses while simple roles continue using ipv4/ipv6 directly.
+
+        2. Derives network policy zone labels from the vlan field of each
+           interface and merges them into k3s.network_policy_labels.  Zone
+           names come directly from the vlan string, matching the names used
+           in network_policies.service_vlans and built-in zones (dmz, etc.).
+           Explicitly configured network_policy_labels are preserved. '''
 
         network = host_def.get('network')
         if not network or not isinstance(network, dict):
             return
 
+        auto_vlans = set()
         for if_key, iface in network.items():
             if not isinstance(iface, dict):
                 continue
-            if iface.get('addresses') is not None:
-                continue
-            synthesized = {}
-            if iface.get('ipv4') is not None:
-                synthesized[iface['ipv4']] = {}
-            if iface.get('ipv6') is not None:
-                synthesized[iface['ipv6']] = {}
-            if synthesized:
-                data[k['hosts']][host]['network'][if_key]['addresses'] = synthesized
+            # Synthesize addresses dict
+            if iface.get('addresses') is None:
+                synthesized = {}
+                if iface.get('ipv4') is not None:
+                    synthesized[iface['ipv4']] = {}
+                if iface.get('ipv6') is not None:
+                    synthesized[iface['ipv6']] = {}
+                if synthesized:
+                    data[k['hosts']][host]['network'][if_key]['addresses'] = synthesized
+            # Collect vlan names for network policy label derivation
+            vlan = iface.get('vlan')
+            if vlan:
+                auto_vlans.add(str(vlan))
+
+        # Merge auto-derived vlan labels into k3s.network_policy_labels
+        if auto_vlans:
+            k3s_section = data[k['hosts']][host].get('k3s')
+            if not isinstance(k3s_section, dict):
+                data[k['hosts']][host]['k3s'] = {}
+            existing = set(
+                data[k['hosts']][host]['k3s'].get('network_policy_labels') or [])
+            data[k['hosts']][host]['k3s']['network_policy_labels'] = sorted(
+                existing | auto_vlans)
 
     def validate_host(self, plugin, host, host_def, hosts, parser):
         ''' Dryrun validation for k3s-pod hosts. '''

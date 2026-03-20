@@ -1,8 +1,72 @@
+# Compute the effective namespace list.
+#
+# whitelist mode (default): namespaces: lists the namespaces to manage.
+# blacklist mode:           policies apply to ALL cluster namespaces except
+#                           system_namespaces and excluded_namespaces.
+
+- name: query all namespaces (blacklist mode)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+  register: _np_all_namespaces
+  when: _k3s_cfg.network_policies.mode | default('whitelist') == 'blacklist'
+
+- name: compute effective namespace list
+  set_fact:
+    _np_namespaces: "{{_k3s_cfg.network_policies | k3s_np_effective_namespaces(
+        _np_all_namespaces.resources | default([]) | map(attribute='metadata.name') | list
+      )}}"
+
+- name: query ansible-managed network policies
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{_ns}}"
+    label_selectors:
+      - "configurator=ansible"
+  loop: "{{_np_namespaces}}"
+  loop_control:
+    loop_var: _ns
+  register: _np_queries
+
+- name: index ansible-managed network policies by namespace/name
+  set_fact:
+    _np_existing: >-
+      {{ _np_queries.results | map(attribute='resources') | flatten
+         | k3s_ns_resource_index }}
+
+- name: build desired network policies
+  set_fact:
+    _np_desired: "{{ lookup('template', 'network-policies.yaml.j2') | from_yaml_all | select('mapping') | list }}"
+  vars:
+    _np_cfg: "{{_k3s_cfg.network_policies}}"
+
 - name: deploy network policies
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
-    definition: "{{lookup('template', 'network-policies.yaml.j2')}}"
-  vars:
-    _np_cfg: "{{_k3s_cfg.network_policies}}"
+    definition: "{{_np_resource}}"
+  loop: "{{_np_desired}}"
+  loop_control:
+    loop_var: _np_resource
+  when: >
+    _np_resource | k3s_content_changed(
+      _np_existing[_np_resource.metadata.namespace ~ '/' ~ _np_resource.metadata.name] | default(none))
+
+- name: remove stale ansible-managed network policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{item.metadata.namespace}}"
+  loop: "{{_np_queries.results | map(attribute='resources') | flatten
+            | rejectattr('metadata.name', 'in', _k3s_cfg.network_policies | k3s_np_expected_names)
+            | list}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"

@@ -1,0 +1,39 @@
+- name: query all namespaces (blacklist mode)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+  register: _np_all_namespaces
+  when: _k3s_cfg.network_policies.mode | default('whitelist') == 'blacklist'
+
+- name: compute effective namespace list
+  set_fact:
+    _np_namespaces: "{{_k3s_cfg.network_policies | k3s_np_effective_namespaces(
+        _np_all_namespaces.resources | default([]) | map(attribute='metadata.name') | list
+      )}}"
+
+- name: query ansible-managed network policies
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{_ns}}"
+    label_selectors:
+      - "configurator=ansible"
+  loop: "{{_np_namespaces}}"
+  loop_control:
+    loop_var: _ns
+  register: _np_queries
+
+- name: remove ansible-managed network policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{item.metadata.namespace}}"
+  loop: "{{_np_queries.results | map(attribute='resources') | flatten}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
