@@ -1,0 +1,131 @@
+# Manage one server_cert_files entry (loop var: _scf).
+#
+# If the passdb entry is empty and generate.type == 'ca' is set, generates
+# a self-signed CA cert + key locally on the Ansible controller, stores both
+# in passdb, then deploys the cert to the target node.
+#
+# The cert is only deployed to server nodes (kube-apiserver consumers).
+# Agents do not receive it.
+#
+# Supported _scf keys:
+#   dest      (required) Absolute path on the server node
+#   passdb    (required) Passdb path for the certificate content
+#   generate  (optional) Auto-generate if passdb entry is empty:
+#     type            'ca' (self-signed CA cert)
+#     cn              Certificate CN       (default: k3s Management CA)
+#     days            Validity in days     (default: 3650)
+#     key_bits        RSA key size         (default: 4096)
+#     key_passdb      Passdb path to store the private key (optional)
+
+- name: look up cert in passdb ({{_scf.dest}})
+  ansible.builtin.set_fact:
+    _scf_existing: "{{lookup(k3s_passdb, _scf.passdb, missing='empty')}}"
+  no_log: true
+
+- name: generate self-signed CA cert ({{_scf.dest}})
+  when:
+    - _scf_existing == ''
+    - (_scf.generate | default({})).type | default('') == 'ca'
+  block:
+    - name: create temp dir for CA generation
+      ansible.builtin.tempfile:
+        state: directory
+      register: _scf_tmpdir
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: generate CA private key
+      ansible.builtin.command:
+        cmd: "openssl genrsa -out {{_scf_tmpdir.path}}/ca.key {{_scf.generate.key_bits | default(4096)}}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: generate self-signed CA certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -new
+          - -nodes
+          - -key
+          - "{{_scf_tmpdir.path}}/ca.key"
+          - -sha256
+          - -days
+          - "{{_scf.generate.days | default(3650)}}"
+          - -out
+          - "{{_scf_tmpdir.path}}/ca.crt"
+          - -subj
+          - "/CN={{_scf.generate.cn | default('k3s Management CA')}}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: read generated CA cert
+      ansible.builtin.slurp:
+        src: "{{_scf_tmpdir.path}}/ca.crt"
+      register: _scf_ca_cert_b64
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: read generated CA key
+      ansible.builtin.slurp:
+        src: "{{_scf_tmpdir.path}}/ca.key"
+      register: _scf_ca_key_b64
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: store CA cert in passdb ({{_scf.passdb}})
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _scf.passdb, create=true, userpass=_scf_ca_cert_b64.content | b64decode)}}"
+      run_once: true
+      no_log: true
+
+    - name: store CA key in passdb ({{_scf.generate.key_passdb}})
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _scf.generate.key_passdb, create=true, userpass=_scf_ca_key_b64.content | b64decode)}}"
+      when: _scf.generate.key_passdb is defined
+      run_once: true
+      no_log: true
+
+    - name: remove CA generation temp dir
+      ansible.builtin.file:
+        path: "{{_scf_tmpdir.path}}"
+        state: absent
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+- name: deploy cert to server node ({{_scf.dest}})
+  ansible.builtin.copy:
+    content: "{{(lookup(k3s_passdb, _scf.passdb, returnall=true).split('\nlookup_pass:')[0] + '\n')}}"
+    dest: "{{_scf.dest}}"
+    mode: "0644"
+    owner: root
+  register: _scf_deployed
+  no_log: true
+  when: k3s_role|default('agent') == 'server'
+
+- name: record cert file change ({{_scf.dest}})
+  ansible.builtin.set_fact:
+    _k3s_server_certs_changed: true
+  when: _scf_deployed is changed

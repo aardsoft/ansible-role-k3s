@@ -230,6 +230,18 @@
     _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode={{_k3s_cfg.kubeconfig_mode|default('0600')}}"
   when: _first_server == true and not (_k3s_cfg.use_config_file | default(false))
 
+- name: init server certs change tracker
+  ansible.builtin.set_fact:
+    _k3s_server_certs_changed: false
+
+- name: manage server cert files
+  include_tasks: manage_server_cert_file.yml
+  loop: "{{_k3s_cfg.server_cert_files | default([])}}"
+  loop_control:
+    loop_var: _scf
+    label: "{{_scf.dest}}"
+  when: _k3s_cfg.server_cert_files is defined
+
 - name: write k3s config.yaml
   ansible.builtin.template:
     src: k3s-config.j2
@@ -275,12 +287,31 @@
     name: k3s
     daemon_reload: true
     state: restarted
+  register: _k3s_restarted
   when: >
     (_dropin_status is defined and _dropin_status is changed) or
     (_k3s_config_status is defined and _k3s_config_status is changed) or
     (_k3s_registries_written is defined and _k3s_registries_written is changed) or
-    (_k3s_registries_removed is defined and _k3s_registries_removed is changed)
+    (_k3s_registries_removed is defined and _k3s_registries_removed is changed) or
+    (_k3s_server_certs_changed | default(false))
   ignore_errors: true
+
+# Wait for k3s to be active again before the playbook moves to the next node
+# (serial: 1 in k3s.yml).  This prevents etcd quorum loss on 3-node clusters
+# when a config change (e.g. kube-apiserver-arg for OIDC) triggers a rolling
+# restart of all server nodes.
+# Checking the local systemd state avoids any assumptions about which address
+# the API server binds to or whether it is reachable from the controller.
+- name: wait for k3s service to be active after restart
+  ansible.builtin.systemd:
+    name: k3s
+  register: _k3s_service_state
+  until: _k3s_service_state.status.ActiveState == 'active'
+  retries: 30
+  delay: 10
+  when: >
+    _k3s_restarted is defined and _k3s_restarted is changed and
+    k3s_role|default('agent') == 'server'
 
 - name: setup master
   include_tasks: setup_master.yml
