@@ -59,6 +59,13 @@
 - name: manage node labels
   include_tasks: manage_node_labels.yml
 
+- name: apply cluster RBAC resources
+  include_tasks: deploy_rbac.yml
+  when: >
+    _k3s_cfg.rbac_var is defined or
+    _k3s_cfg.rbac_files is defined or
+    _k3s_cfg.user_namespaces is defined
+
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"

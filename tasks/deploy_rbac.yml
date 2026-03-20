@@ -1,0 +1,197 @@
+# Apply RBAC resources to the cluster.
+#
+# We support two source mechanisms, both optional and combinable:
+#
+# 1. rbac_files — list of file paths relative to playbook_dir, each containing
+#    one or more YAML k8s resource documents. One resource per file is preferred
+#    for clean git diffs. Files are applied in the order listed.
+#
+#    k3s:
+#      rbac_files:
+#        - rbac/mycluster/00-namespace-user-apps.yml
+#        - rbac/mycluster/10-clusterrole-user-base.yml
+#
+# 2. rbac_var — name of a variable containing a list of k8s resource dicts.
+#    Useful for small or generated resources that don't warrant separate files.
+#
+#    k3s:
+#      rbac_var: k3s_mycluster_rbac
+#
+# Additionally we also support user namespaces:
+#
+#    user_namespaces — dict of namespace name to access spec. Each entry
+#    creates a Namespace, a namespace-owner Role (same rules as user-apps-owner:
+#    apps/core/batch/traefik.io; no networking.k8s.io Ingress, no MetalLB),
+#    and a RoleBinding for the specified groups and/or users.
+#    Users listed explicitly also get a ClusterRoleBinding to k3s-user-base
+#    for cluster-level visibility (listing namespaces, CRDs, etc.).
+#    Groups are assumed to already have cluster visibility via their own
+#    ClusterRoleBinding (e.g. from rbac_files).
+#
+#    k3s:
+#      user_namespaces:
+#        user-apps:
+#          groups: [k3s-users]         # all group members share this namespace
+#        alice-private:
+#          users: [alice]              # per-user namespace
+#        alice-bob-shared:
+#          users: [alice, bob]         # shared between specific users
+#        team-ns:
+#          groups: [k3s-users]
+#          users: [external-user]      # group + extra individual users
+#
+# rbac_files are applied first, then rbac_var resources, then user_namespaces.
+#
+# Note: RBAC alone cannot restrict which IP addresses or ports appear in Service
+# specs. For field-level admission control (e.g. restricting LoadBalancer IPs
+# to a specific pool), deploy Kyverno and add ClusterPolicy resources here.
+
+- name: apply RBAC from files
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition: "{{lookup('file', playbook_dir + '/' + item) | from_yaml}}"
+  loop: "{{_k3s_cfg.rbac_files | default([])}}"
+  loop_control:
+    label: "{{item}}"
+  when: _k3s_cfg.rbac_files is defined
+
+- name: look up RBAC resources variable
+  ansible.builtin.set_fact:
+    _k3s_rbac_resources: "{{ lookup('vars', _k3s_cfg.rbac_var) }}"
+  when: _k3s_cfg.rbac_var is defined
+
+- name: apply RBAC from variable
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: "{{ item.state | default('present') }}"
+    definition: >-
+      {{ item
+         | dict2items
+         | rejectattr('key', 'equalto', 'state')
+         | items2dict }}
+  loop: "{{ _k3s_rbac_resources | default([]) }}"
+  loop_control:
+    label: "{{ item.kind }}/{{ item.metadata.namespace | default('cluster') }}/{{ item.metadata.name }}"
+  when: _k3s_rbac_resources is defined
+
+# --- user_namespaces ---
+
+- name: create user namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: v1
+      kind: Namespace
+      metadata:
+        name: "{{item.key}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  when: _k3s_cfg.user_namespaces is defined
+
+- name: create namespace-owner Role in user namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: Role
+      metadata:
+        name: namespace-owner
+        namespace: "{{item.key}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+      rules:
+        - apiGroups: [apps]
+          resources: [deployments, statefulsets, daemonsets, replicasets]
+          verbs: [get, list, watch, create, update, patch, delete]
+        - apiGroups: [""]
+          resources: [services, configmaps, secrets, pods, pods/log, pods/exec,
+                      persistentvolumeclaims, serviceaccounts]
+          verbs: [get, list, watch, create, update, patch, delete]
+        - apiGroups: [batch]
+          resources: [jobs, cronjobs]
+          verbs: [get, list, watch, create, update, patch, delete]
+        # Traefik only — networking.k8s.io Ingress intentionally absent
+        - apiGroups: [traefik.io]
+          resources: [ingressroutes, ingressroutetcps, ingressrouteudps,
+                      middlewares, middlewaretcps, tlsstores, tlsoptions]
+          verbs: [get, list, watch, create, update, patch, delete]
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  when: _k3s_cfg.user_namespaces is defined
+
+- name: create namespace-owner RoleBinding in user namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: RoleBinding
+      metadata:
+        name: namespace-owner
+        namespace: "{{item.key}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+      subjects: >-
+        {{
+          (item.value.groups | default([])
+           | map('community.general.dict_kv', 'name')
+           | map('combine', {'kind': 'Group', 'apiGroup': 'rbac.authorization.k8s.io'})
+           | list)
+          +
+          (item.value.users | default([])
+           | map('community.general.dict_kv', 'name')
+           | map('combine', {'kind': 'User', 'apiGroup': 'rbac.authorization.k8s.io'})
+           | list)
+        }}
+      roleRef:
+        kind: Role
+        name: namespace-owner
+        apiGroup: rbac.authorization.k8s.io
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  when: _k3s_cfg.user_namespaces is defined
+
+- name: create ClusterRoleBinding for explicitly listed namespace users
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    definition:
+      apiVersion: rbac.authorization.k8s.io/v1
+      kind: ClusterRoleBinding
+      metadata:
+        name: "k3s-user-base-{{item}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+      subjects:
+        - kind: User
+          name: "{{item}}"
+          apiGroup: rbac.authorization.k8s.io
+      roleRef:
+        kind: ClusterRole
+        name: k3s-user-base
+        apiGroup: rbac.authorization.k8s.io
+  loop: >-
+    {{
+      _k3s_cfg.user_namespaces.values()
+      | map(attribute='users') | select('defined')
+      | flatten | unique
+    }}
+  loop_control:
+    label: "{{item}}"
+  when: _k3s_cfg.user_namespaces is defined
