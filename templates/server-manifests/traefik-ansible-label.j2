@@ -25,6 +25,14 @@ spec:
         exposedPort: 80
         expose:
           default: true
+{% if ep.redirect_to_secure | default(true) %}
+        http:
+          redirections:
+            entryPoint:
+              to: {{ep_name}}-secure
+              scheme: https
+              permanent: true
+{% endif %}
       {{ep_name}}-secure:
         port: 10443
         exposedPort: 443
@@ -39,6 +47,14 @@ spec:
         exposedPort: 80
         expose:
           default: false
+{% if ep.redirect_to_secure | default(true) %}
+        http:
+          redirections:
+            entryPoint:
+              to: {{ep_name}}-secure
+              scheme: https
+              permanent: true
+{% endif %}
       {{ep_name}}-secure:
         port: {{11443 + loop.index0 * 1000}}
         exposedPort: 443
