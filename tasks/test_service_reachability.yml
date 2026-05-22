@@ -42,6 +42,7 @@
 - name: test service IP reachability from each node
   block:
     - name: create per-node service IP test pods
+      changed_when: false
       kubernetes.core.k8s:
         kubeconfig: "{{_k3s_kubecfg}}"
         state: present
@@ -220,6 +221,7 @@
 
   always:
     - name: remove service IP test pods
+      changed_when: false
       kubernetes.core.k8s:
         kubeconfig: "{{_k3s_kubecfg}}"
         state: absent
