@@ -1,0 +1,100 @@
+# Detect and recover from a Kyverno webhook blocking cluster operations.
+#
+# When Kyverno pods are unavailable (upgrade, crash, first boot ordering) and
+# its ValidatingWebhookConfigurations have failurePolicy: Fail, all k8s API
+# operations touching managed resource types fail with:
+#   "no endpoints available for service kyverno-svc"
+#
+# By default this task does NOT auto-patch webhooks — doing so would
+# temporarily disable policy enforcement and is a security-sensitive operation.
+# If Kyverno is blocking the cluster, the operator must explicitly opt-in by
+# setting the variable on the ansible-playbook command line:
+#
+#   ansible-playbook ... -e k3s_fix_kyverno_webhooks=true
+#
+# When opted-in, the task patches affected webhooks to Ignore, unblocking the
+# cluster.  A subsequent Kyverno Helm deployment (in the deployments loop)
+# will restore the configured failure policy via Helm values.
+#
+# Run unconditionally before any deployment loop — kyverno may have been
+# deployed in a prior run and could be blocking even if it is not in the
+# current deployment list.
+
+- name: check kyverno admission controller readiness
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: apps/v1
+    kind: Deployment
+    name: kyverno-admission-controller
+    namespace: kyverno
+  register: _kyverno_fix_ac
+  failed_when: false
+
+- name: set kyverno readiness fact
+  set_fact:
+    _kyverno_is_ready: >-
+      {{
+        not (_kyverno_fix_ac.failed | default(false)) and
+        _kyverno_fix_ac.resources | length > 0 and
+        (_kyverno_fix_ac.resources[0].status.availableReplicas | default(0)) >= 1
+      }}
+
+- name: get all ValidatingWebhookConfigurations
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: admissionregistration.k8s.io/v1
+    kind: ValidatingWebhookConfiguration
+  register: _kyverno_fix_vwcs
+  failed_when: false
+
+- name: identify blocked kyverno webhooks
+  set_fact:
+    _kyverno_blocked_vwcs: >-
+      {{
+        _kyverno_fix_vwcs.resources | default([])
+        | selectattr('metadata.name', 'search', 'kyverno')
+        | selectattr('webhooks', 'defined')
+        | selectattr('webhooks', 'selectattr', 'failurePolicy', 'equalto', 'Fail')
+        | list
+      }}
+
+- name: abort if kyverno webhooks are blocking and auto-fix is disabled
+  ansible.builtin.fail:
+    msg: >
+      Kyverno admission controller is not ready and its webhooks are blocking
+      cluster operations.  The following ValidatingWebhookConfigurations have
+      failurePolicy=Fail:
+
+        {{ _kyverno_blocked_vwcs | map(attribute='metadata.name') | list | join('\n  ') }}
+
+      To unblock the cluster, re-run the playbook with:
+
+        ansible-playbook ... -e k3s_fix_kyverno_webhooks=true
+
+      This will temporarily patch the webhooks to failurePolicy=Ignore.  The
+      next Kyverno Helm deploy (if kyverno is in the deployment list) will
+      restore the proper failure policy. Doing this may be a policy violation -
+      so only do this if Kyverno is really broken, and not in situations like
+      a cluster just starting up.
+  when:
+    - not _kyverno_is_ready
+    - _kyverno_blocked_vwcs | length > 0
+    - not (k3s_fix_kyverno_webhooks | default(false) | bool)
+
+- name: patch kyverno ValidatingWebhookConfigurations to failurePolicy Ignore
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    api_version: admissionregistration.k8s.io/v1
+    kind: ValidatingWebhookConfiguration
+    name: "{{item.metadata.name}}"
+    merge_type: merge
+    definition:
+      webhooks: "{{item.webhooks | map('combine', {'failurePolicy': 'Ignore'}) | list}}"
+  loop: "{{_kyverno_blocked_vwcs}}"
+  when:
+    - not _kyverno_is_ready
+    - _kyverno_blocked_vwcs | length > 0
+    - k3s_fix_kyverno_webhooks | default(false) | bool
+  loop_control:
+    label: "{{item.metadata.name}}"

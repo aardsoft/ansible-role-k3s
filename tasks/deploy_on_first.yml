@@ -69,6 +69,13 @@
     _k3s_cfg.rbac_files is defined or
     _k3s_cfg.user_namespaces is defined
 
+# kyverno is not part of this core deployment - but a broken kyverno can block
+# us from deploying anything going forward, so we check here if kyverno (if it
+# exists) is in a good state, and if it isn't, we inform about it, and allow
+# an override option.
+- name: fix kyverno webhook if blocking
+  include_tasks: fix_kyverno_webhook.yml
+
 - name: run extra deployments
   include_tasks: "deployments.yml"
   with_dict: "{{_k3s_cfg.deployments|default({})}}"
