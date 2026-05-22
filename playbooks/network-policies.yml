@@ -1,0 +1,92 @@
+# Apply or remove k3s NetworkPolicy resources without running a full cluster
+# setup.
+#
+# This playbook only runs the network policy tasks from deploy_on_first.yml
+# — it skips cluster bootstrap, infrastructure components, deployments, and
+# pod management.  Useful when tuning network-policies config in group_vars
+# without waiting for the full run.
+#
+# Usage:
+#   ansible-playbook network-policies.yml
+#   ansible-playbook network-policies.yml -l <node>
+#   ansible-playbook network-policies.yml -l <node> -e k3s_run_tests=true
+#
+# -l / --limit
+#   Restrict to a specific k3s cluster node.  Network policy tasks only
+#   execute on the first server node, so without -l the play runs against
+#   all k3s_nodes but still only acts on the first server.
+#
+# k3s_run_tests
+#   Run connectivity tests after applying policies.  Tests also run
+#   automatically when network_policies.run_tests: true is set in group_vars.
+
+- name: usage
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: network-policies playbook usage
+      debug:
+        msg:
+          - "k3s/playbooks/network-policies.yml — apply k3s NetworkPolicy resources"
+          - ""
+          - "Options:"
+          - "  -l <node>                 target a specific k3s node (tasks only run on first server)"
+          - "  -e k3s_run_tests=true    run connectivity tests after applying policies"
+          - ""
+          - "Examples:"
+          - "  ansible-playbook network-policies.yml -l k3sm3"
+          - "  ansible-playbook network-policies.yml -l k3sm3 -e k3s_run_tests=true"
+
+- hosts: all,!k3s_pods,!k3s_pod_containers
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: data-utilities
+        tasks_from: check_versions
+      vars:
+        data_utilities_minver: 0.9
+    - include_role:
+        name: data-utilities
+        tasks_from: check_transactional
+    - include_role:
+        name: data-utilities
+        tasks_from: setup_passdb
+    - include_role:
+        name: data-utilities
+        tasks_from: default_variables
+
+- hosts: k3s_nodes
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: k3s
+        tasks_from: setup_facts
+    - include_role:
+        name: k3s
+        tasks_from: deploy_network_policies
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.network_policies is defined and
+        _k3s_cfg.network_policies.state | default('present') == 'present'
+    - include_role:
+        name: k3s
+        tasks_from: test_network_policies
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.network_policies is defined and
+        _k3s_cfg.network_policies.state | default('present') == 'present' and
+        (_k3s_cfg.network_policies.run_tests | default(false) or k3s_run_tests | default(false))
+    - include_role:
+        name: k3s
+        tasks_from: remove_network_policies
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.network_policies is defined and
+        _k3s_cfg.network_policies.state | default('present') == 'absent'

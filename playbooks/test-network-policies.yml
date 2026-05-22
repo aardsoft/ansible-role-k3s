@@ -1,0 +1,75 @@
+# Run network policy connectivity tests against a live k3s cluster.
+#
+# Creates a temporary namespace, applies cluster network policies to it,
+# deploys labelled test pods, verifies expected reachability and
+# unreachability, and always cleans up on exit.
+#
+# Usage:
+#   ansible-playbook test-network-policies.yml -l <node>
+#
+# -l / --limit
+#   Target a specific k3s cluster node.  All tasks run on the first server;
+#   without -l the play covers all k3s_nodes but still acts on the first only.
+#
+# Optional variables (-e):
+#   _np_test_namespace          test namespace name            (default: netpol-test)
+#   _np_internet_target_ip      IP for internet reach tests    (default: 1.1.1.1)
+#   _np_internet_target_port    port for internet reach tests  (default: 80)
+#
+# Examples:
+#   ansible-playbook test-network-policies.yml -l k3sm3
+#   ansible-playbook test-network-policies.yml -l k3sm3 -e _np_test_namespace=np-ci-test
+
+- name: usage
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: test-network-policies playbook usage
+      debug:
+        msg:
+          - "k3s/playbooks/test-network-policies.yml — run network policy connectivity tests"
+          - ""
+          - "Options:"
+          - "  -l <node>                       target a specific k3s node"
+          - "  -e _np_test_namespace=X         test namespace (default: netpol-test)"
+          - "  -e _np_internet_target_ip=X     IP for internet tests (default: 1.1.1.1)"
+          - "  -e _np_internet_target_port=X   port for internet tests (default: 80)"
+          - ""
+          - "Examples:"
+          - "  ansible-playbook test-network-policies.yml -l k3sm3"
+
+- hosts: all,!k3s_pods,!k3s_pod_containers
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: data-utilities
+        tasks_from: check_versions
+      vars:
+        data_utilities_minver: 0.9
+    - include_role:
+        name: data-utilities
+        tasks_from: check_transactional
+    - include_role:
+        name: data-utilities
+        tasks_from: setup_passdb
+    - include_role:
+        name: data-utilities
+        tasks_from: default_variables
+
+- hosts: k3s_nodes
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: k3s
+        tasks_from: setup_facts
+    - include_role:
+        name: k3s
+        tasks_from: test_network_policies
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.network_policies is defined

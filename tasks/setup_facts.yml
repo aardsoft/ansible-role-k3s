@@ -1,0 +1,44 @@
+# Minimal k3s fact initialisation needed by focused playbooks that skip the
+# full role entry point (main.yml).  Sets: k3s_passdb, _k3s_kubecfg,
+# _k3s_cfg, _first_server.
+#
+# Called by playbooks/pods.yml, playbooks/deployments.yml, and
+# playbooks/network-policies.yml so they can share the same setup logic
+# without running the full cluster bootstrap in main.yml.
+
+- name: initialise _first_server
+  set_fact:
+    _first_server: false
+
+- name: set default password store
+  set_fact:
+    k3s_passdb: "{{passdb|default('passwordstore')}}"
+  when: k3s_passdb is undefined
+
+- name: set default kubeconfig location
+  set_fact:
+    _k3s_kubecfg: /etc/rancher/k3s/k3s.yaml
+
+- name: load k3s config from k3s_clusters variable
+  set_fact:
+    _k3s_cfg: "{{k3s_clusters[k3s_cluster] if k3s_clusters[k3s_cluster] is mapping else vars[k3s_clusters[k3s_cluster]]}}"
+  when: >
+    _k3s_cfg is undefined and
+    k3s_cluster is defined and
+    k3s_clusters is defined and
+    k3s_clusters[k3s_cluster] is defined
+
+- name: set kubeconfig location override
+  set_fact:
+    _k3s_kubecfg: "{{_k3s_cfg.kubecfg}}"
+  when: >-
+    _k3s_cfg is defined and
+    _k3s_cfg.kubecfg is defined
+
+- name: check for first server
+  set_fact:
+    _first_server: true
+  when: >
+    ansible_all_ipv4_addresses is defined and
+    _k3s_cfg is defined and
+    _k3s_cfg.first_server in ansible_all_ipv4_addresses

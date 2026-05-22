@@ -1,0 +1,30 @@
+# k3s-pod and k3s_pod_containers hosts use sshkubectl and may not exist yet
+# at playbook runtime - exclude them from the setup play.
+- hosts: all,!k3s_pods,!k3s_pod_containers
+  become: True
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: data-utilities
+        tasks_from: check_versions
+      vars:
+        data_utilities_minver: 0.9
+    - include_role:
+        name: data-utilities
+        tasks_from: check_transactional
+    - include_role:
+        name: data-utilities
+        tasks_from: setup_passdb
+    - include_role:
+        name: data-utilities
+        tasks_from: default_variables
+
+- hosts: k3s_nodes
+  become: True
+  vars:
+    ansible_user: management
+  roles:
+    - k3s
+  tags:
+    - skip_basic

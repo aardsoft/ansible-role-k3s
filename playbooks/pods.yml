@@ -1,0 +1,77 @@
+# Deploy or update k3s pods without running a full cluster setup.
+#
+# This playbook only runs pod management (manage_pods.yml) — it skips cluster
+# bootstrap, infrastructure components (MetalLB, Longhorn, kured), server
+# manifests, deployments, and network policies.
+#
+# Usage:
+#   ansible-playbook pods.yml
+#   ansible-playbook pods.yml -l <node>
+#   ansible-playbook pods.yml -l <node> -e k3s_pod_limit=<pod>[,<pod>...]
+#
+# -l / --limit
+#   Restrict to a specific k3s cluster node.  Pod management tasks only
+#   execute on the first server node, so without -l the play runs against
+#   all k3s_nodes but still only acts on the first server.
+#
+# k3s_pod_limit
+#   Comma-separated list (or YAML list) of pod names to manage.
+#   When unset, all pods matching the cluster are managed.
+#   Examples:
+#     -e k3s_pod_limit=tinydns
+#     -e k3s_pod_limit=tinydns,authelia
+#     -e 'k3s_pod_limit=[tinydns, authelia]'
+
+- name: usage
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: pod playbook usage
+      debug:
+        msg:
+          - "k3s/playbooks/pods.yml — deploy or update k3s pods"
+          - ""
+          - "Options:"
+          - "  -l <node>              target a specific k3s node (pod tasks only run on first server)"
+          - "  -e k3s_pod_limit=X     comma-separated pod names to manage (default: all pods)"
+          - ""
+          - "Examples:"
+          - "  ansible-playbook pods.yml -l k3sm3"
+          - "  ansible-playbook pods.yml -l k3sm3 -e k3s_pod_limit=tinydns"
+          - "  ansible-playbook pods.yml -e k3s_pod_limit=tinydns,authelia"
+
+- hosts: all,!k3s_pods,!k3s_pod_containers
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: data-utilities
+        tasks_from: check_versions
+      vars:
+        data_utilities_minver: 0.9
+    - include_role:
+        name: data-utilities
+        tasks_from: check_transactional
+    - include_role:
+        name: data-utilities
+        tasks_from: setup_passdb
+    - include_role:
+        name: data-utilities
+        tasks_from: default_variables
+
+- hosts: k3s_nodes
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: k3s
+        tasks_from: setup_facts
+    - include_role:
+        name: k3s
+        tasks_from: manage_pods
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        network_pods is defined
