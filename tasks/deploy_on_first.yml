@@ -19,6 +19,12 @@
     _k3s_cfg.longhorn.state is defined and
     _k3s_cfg.longhorn.state == 'present'
 
+- include_tasks: heal_longhorn_volumes.yml
+  when: >
+    _k3s_cfg.longhorn is defined and
+    _k3s_cfg.longhorn.state is defined and
+    _k3s_cfg.longhorn.state == 'present'
+
 - include_tasks: remove_longhorn.yml
   when: >
     _k3s_cfg.longhorn is defined and

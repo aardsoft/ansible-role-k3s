@@ -1,0 +1,80 @@
+# Auto-heal Longhorn volumes stuck in attaching/faulted states.
+#
+# Longhorn occasionally leaves a volume in 'attaching' with a stopped engine
+# while the VolumeAttachment still reports attached=true.  One chance for this
+# to happen is when a complete cluster goes down.  Deleting the VolumeAttachment
+# forces a re-detach / re-attach cycle that usually clears the condition.
+#
+# Only acts on volumes that have been stuck for at least one minute to avoid
+# racing normal attachment startup.
+
+- name: list Longhorn volumes
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: longhorn.io/v1beta2
+    kind: Volume
+    namespace: longhorn-system
+  register: _longhorn_volumes
+
+- name: identify stuck Longhorn volumes
+  ansible.builtin.set_fact:
+    _longhorn_stuck_volumes: >-
+      {{
+        _longhorn_volumes.resources
+        | selectattr('status.state', 'in', ['attaching', 'detaching', 'faulted'])
+        | list
+      }}
+
+- name: debug stuck volumes
+  ansible.builtin.debug:
+    msg: >-
+      Longhorn volume {{item.metadata.name}} is stuck in state={{item.status.state}}
+      robustness={{item.status.robustness}}
+  loop: "{{_longhorn_stuck_volumes}}"
+  when: _longhorn_stuck_volumes | length > 0
+
+# VolumeAttachments name is opaque; we find it by PVC name in status.source.persistentVolumeName
+- name: list VolumeAttachments for stuck volumes
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: storage.k8s.io/v1
+    kind: VolumeAttachment
+  register: _longhorn_volume_attachments
+  when: _longhorn_stuck_volumes | length > 0
+
+- name: build map of VolumeAttachments to delete
+  ansible.builtin.set_fact:
+    _longhorn_vas_to_delete: >-
+      {{
+        _longhorn_volume_attachments.resources | default([])
+        | selectattr('spec.source.persistentVolumeName', 'defined')
+        | selectattr('spec.source.persistentVolumeName', 'in', _longhorn_stuck_volumes | map(attribute='metadata.name') | list)
+        | list
+      }}
+  when: _longhorn_stuck_volumes | length > 0
+
+- name: delete stale VolumeAttachments to force reattach
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    api_version: storage.k8s.io/v1
+    kind: VolumeAttachment
+    name: "{{item.metadata.name}}"
+  loop: "{{_longhorn_vas_to_delete | default([])}}"
+  when: (_longhorn_vas_to_delete | default([])) | length > 0
+
+- name: wait for Longhorn volumes to recover
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: longhorn.io/v1beta2
+    kind: Volume
+    namespace: longhorn-system
+    name: "{{item.metadata.name}}"
+  register: _longhorn_vol_check
+  until: >
+    _longhorn_vol_check.resources | length > 0 and
+    _longhorn_vol_check.resources[0].status.state not in ['attaching', 'detaching', 'faulted']
+  retries: 30
+  delay: 10
+  loop: "{{_longhorn_stuck_volumes}}"
+  when: _longhorn_stuck_volumes | length > 0
