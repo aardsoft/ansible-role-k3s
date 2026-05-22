@@ -1,0 +1,373 @@
+# Network policy connectivity tests.
+#
+# Creates a dedicated test namespace, applies the cluster network policies to
+# it, deploys labelled test pods, verifies expected reachability and
+# unreachability, then always cleans up the namespace regardless of results.
+#
+# Test matrix:
+#   client-default -> server-clustersvc:8080     expect: reachable  (cluster-service egress)
+#   client-default -> server-default:8080        expect: blocked    (default deny)
+#   client-default -> internet (1.1.1.1:80)      expect: blocked    (default deny)
+#   client-dmz     -> internet (1.1.1.1:80)      expect: reachable  (dmz egress)
+#   client-dmz     -> server-clustersvc:8080     expect: reachable  (cluster-service egress)
+#   client-dmz     -> server-default:8080        expect: blocked    (default deny)
+#
+# Variables:
+#   _np_test_namespace   override test namespace name (default: netpol-test)
+#   _np_internet_target  IP:port for internet reachability tests (default: 1.1.1.1 80)
+
+- name: initialise test state
+  set_fact:
+    _np_test_ns: "{{_np_test_namespace | default('netpol-test')}}"
+    _np_inet_ip: "{{_np_internet_target_ip | default('1.1.1.1')}}"
+    _np_inet_port: "{{_np_internet_target_port | default('80')}}"
+    _np_test_results: []
+
+- name: network policy test run
+  block:
+    - name: create test namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{_np_test_ns}}"
+      changed_when: false
+
+    # Re-run policy deployment so the new namespace is included.
+    - name: deploy network policies (including test namespace)
+      include_tasks: deploy_network_policies.yml
+      vars:
+        _np_test_mode: true
+
+    # ── test pod: unlabelled server ──────────────────────────────────────────
+    # Server pods use a busybox nc listen loop rather than httpd: httpd is not
+    # present in all busybox image builds, whereas nc -l is always available.
+    # The loop responds to every connection with a minimal HTTP 200 header so
+    # client-side `grep -q HTTP` can confirm reachability.
+    - name: deploy server-default pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-server-default
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-server-default
+          spec:
+            containers:
+              - name: server
+                image: busybox
+                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\nOK' | nc -l -p 8080; done"]
+      changed_when: false
+
+    - name: deploy server-default Service
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: np-test-server-default
+            namespace: "{{_np_test_ns}}"
+          spec:
+            selector:
+              app: np-test-server-default
+            ports:
+              - port: 8080
+                targetPort: 8080
+      changed_when: false
+
+    # ── test pod: cluster-service server ────────────────────────────────────
+    - name: deploy server-clustersvc pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-server-clustersvc
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-server-clustersvc
+              network/cluster-service: "true"
+          spec:
+            containers:
+              - name: server
+                image: busybox
+                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\nOK' | nc -l -p 8080; done"]
+      changed_when: false
+
+    - name: deploy server-clustersvc Service
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Service
+          metadata:
+            name: np-test-server-clustersvc
+            namespace: "{{_np_test_ns}}"
+          spec:
+            selector:
+              app: np-test-server-clustersvc
+            ports:
+              - port: 8080
+                targetPort: 8080
+      changed_when: false
+
+    # ── test pod: unlabelled client ─────────────────────────────────────────
+    - name: deploy client-default pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-client-default
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-client-default
+          spec:
+            containers:
+              - name: client
+                image: busybox
+                command: ["sleep", "3600"]
+      changed_when: false
+
+    # ── test pod: DMZ client ────────────────────────────────────────────────
+    - name: deploy client-dmz pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-client-dmz
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-client-dmz
+              network/dmz: "true"
+          spec:
+            containers:
+              - name: client
+                image: busybox
+                command: ["sleep", "3600"]
+      changed_when: false
+
+    # ── wait for all pods ───────────────────────────────────────────────────
+    # Check both pod phase (Running) and container readiness (ready: true).
+    # Phase alone is insufficient: a pod cycling through CrashLoopBackOff has
+    # phase=Running even while its containers are in Waiting state.
+    - name: wait for test pods to be Running and containers ready
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Pod
+        namespace: "{{_np_test_ns}}"
+        label_selectors:
+          - app in (np-test-server-default, np-test-server-clustersvc, np-test-client-default, np-test-client-dmz)
+      register: _np_test_pods
+      until: >
+        _np_test_pods.resources | length == 4 and
+        _np_test_pods.resources | map(attribute='status.phase') | list | unique == ['Running'] and
+        (_np_test_pods.resources |
+         map(attribute='status.containerStatuses') |
+         reject('equalto', None) | flatten |
+         selectattr('ready', 'equalto', true) | list | length) == 4
+      retries: 30
+      delay: 5
+
+    # ── wait for network policy controller ──────────────────────────────────
+    # kube-router NPM processes pod creation events asynchronously.  After pods
+    # reach Running state their IPs may not yet be in the iptables ipsets that
+    # back the label-selector egress/ingress rules.  A brief pause lets the
+    # controller reconcile before we run connectivity checks.
+    - name: wait for network policy controller to process new pods
+      pause:
+        seconds: 15
+
+    # ── connectivity tests ──────────────────────────────────────────────────
+    # Tests use `kubectl exec` via ansible.builtin.command rather than
+    # kubernetes.core.k8s_exec: the k8s_exec module tries to parse the OCI
+    # runtime error string as an integer exit code and raises ValueError when
+    # the exec fails to start (e.g. container in CrashLoopBackOff backoff).
+    # kubectl exec propagates the container exit code correctly.
+    #
+    # Server pods respond to every connection with a minimal HTTP 200 header.
+    # Reachable tests use `{ printf ...; sleep 2; } | nc` to keep nc stdin
+    # open while the server responds (busybox nc does a full close, not a
+    # half-close, when stdin reaches EOF).
+    # Blocked tests use a plain `printf | nc` since a refused/rejected
+    # connection returns immediately; no sleep needed.
+    # All tests use ignore_errors so every test runs before the summary.
+
+    - name: "test 1/6: default client -> cluster-service server (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-default
+          - "--"
+          - sh
+          - "-c"
+          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+      register: _np_t1
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'default -> cluster-service', 'expect': 'reachable', 'pass': _np_t1.rc == 0, 'rc': _np_t1.rc}]}}"
+
+    - name: "test 2/6: default client -> default server (expect: blocked)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-default
+          - "--"
+          - sh
+          - "-c"
+          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+      register: _np_t2
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'default -> default server', 'expect': 'blocked', 'pass': _np_t2.rc != 0, 'rc': _np_t2.rc}]}}"
+
+    - name: "test 3/6: default client -> internet (expect: blocked)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-default
+          - "--"
+          - sh
+          - "-c"
+          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+      register: _np_t3
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'default -> internet', 'expect': 'blocked', 'pass': _np_t3.rc != 0, 'rc': _np_t3.rc}]}}"
+
+    - name: "test 4/6: dmz client -> internet (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-dmz
+          - "--"
+          - sh
+          - "-c"
+          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+      register: _np_t4
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'dmz -> internet', 'expect': 'reachable', 'pass': _np_t4.rc == 0, 'rc': _np_t4.rc}]}}"
+
+    - name: "test 5/6: dmz client -> cluster-service server (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-dmz
+          - "--"
+          - sh
+          - "-c"
+          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+      register: _np_t5
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'dmz -> cluster-service', 'expect': 'reachable', 'pass': _np_t5.rc == 0, 'rc': _np_t5.rc}]}}"
+
+    - name: "test 6/6: dmz client -> default server (expect: blocked)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-dmz
+          - "--"
+          - sh
+          - "-c"
+          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+      register: _np_t6
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'dmz -> default server', 'expect': 'blocked', 'pass': _np_t6.rc != 0, 'rc': _np_t6.rc}]}}"
+
+    # ── summary and assertion ───────────────────────────────────────────────
+    - name: format test result lines
+      set_fact:
+        _np_summary_lines: "{{ (_np_summary_lines | default([])) + [line] }}"
+      vars:
+        line: "  {{ '[PASS]' if item.pass else '[FAIL]' }} {{ item.name }}: expected {{ item.expect }}, rc={{ item.rc }}"
+      loop: "{{_np_test_results}}"
+      loop_control:
+        label: "{{item.name}}"
+
+    - name: network policy test summary
+      debug:
+        msg: "{{ ['Network policy tests: ' ~ (_np_test_results | selectattr('pass', 'equalto', true) | list | length) ~ '/' ~ (_np_test_results | length) ~ ' passed'] + _np_summary_lines }}"
+
+    - name: assert all network policy tests passed
+      assert:
+        that: "_np_test_results | selectattr('pass', 'equalto', false) | list | length == 0"
+        fail_msg: >-
+          Network policy test failures:
+          {% for t in _np_test_results | selectattr('pass', 'equalto', false) | list %}
+          - {{ t.name }}: expected {{ t.expect }}, rc={{ t.rc }}
+          {% endfor %}
+        success_msg: "All {{_np_test_results | length}} network policy tests passed."
+
+  always:
+    - name: remove test namespace
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: absent
+        definition:
+          apiVersion: v1
+          kind: Namespace
+          metadata:
+            name: "{{_np_test_ns}}"
+      changed_when: false

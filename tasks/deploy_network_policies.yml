@@ -54,6 +54,7 @@
   when: >
     _np_resource | k3s_content_changed(
       _np_existing[_np_resource.metadata.namespace ~ '/' ~ _np_resource.metadata.name] | default(none))
+  changed_when: not (_np_test_mode | default(false) | bool)
 
 - name: remove stale ansible-managed network policies
   kubernetes.core.k8s:
@@ -68,5 +69,40 @@
   loop: "{{_np_queries.results | map(attribute='resources') | flatten
             | rejectattr('metadata.name', 'in', _k3s_cfg.network_policies | k3s_np_expected_names)
             | list}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+
+# Namespaces moved into system_namespaces or excluded_namespaces are no longer
+# in the effective namespace list, so the stale cleanup above never visits them.
+# Explicitly remove any ansible-managed policies left behind in those namespaces.
+- name: query ansible-managed policies in excluded/system namespaces
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{_ex_ns}}"
+    label_selectors:
+      - "configurator=ansible"
+  loop: >-
+    {{
+      (_k3s_cfg.network_policies.system_namespaces | default([])) +
+      (_k3s_cfg.network_policies.excluded_namespaces | default([]))
+    }}
+  loop_control:
+    loop_var: _ex_ns
+  register: _np_excluded_queries
+  failed_when: false
+
+- name: remove leftover ansible-managed policies from excluded/system namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{item.metadata.namespace}}"
+  loop: "{{_np_excluded_queries.results | map(attribute='resources') | flatten | list}}"
   loop_control:
     label: "{{item.metadata.namespace}}/{{item.metadata.name}}"

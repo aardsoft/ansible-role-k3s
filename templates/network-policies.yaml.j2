@@ -20,7 +20,7 @@ spec:
   - Ingress
   - Egress
 ---
-# ── DNS egress (all pods → kube-dns, always) ──────────────────────────────────
+# ── DNS egress (all pods -> kube-dns, always) ──────────────────────────────────
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -243,7 +243,7 @@ spec:
         matchLabels:
           network/{{ vlan_name }}-access: "true"
 ---
-# ── {{ vlan_name }}: egress for pods with access label → in-cluster + VLAN CIDR ─
+# ── {{ vlan_name }}: egress for pods with access label -> in-cluster + VLAN CIDR ─
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:

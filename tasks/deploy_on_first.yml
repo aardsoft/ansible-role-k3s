@@ -93,6 +93,12 @@
     _k3s_cfg.network_policies is defined and
     _k3s_cfg.network_policies.state | default('present') == 'present'
 
+- include_tasks: test_network_policies.yml
+  when: >
+    _k3s_cfg.network_policies is defined and
+    _k3s_cfg.network_policies.state | default('present') == 'present' and
+    (_k3s_cfg.network_policies.run_tests | default(false) or k3s_run_tests | default(false))
+
 - include_tasks: remove_network_policies.yml
   when: >
     _k3s_cfg.network_policies is defined and
