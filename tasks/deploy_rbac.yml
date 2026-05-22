@@ -77,11 +77,25 @@
 
 # --- user_namespaces ---
 
+- name: get current user namespaces
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: "{{item.key}}"
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  register: _current_user_ns
+  when: _k3s_cfg.user_namespaces is defined
+
 - name: create user namespaces
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition:
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: v1
       kind: Namespace
       metadata:
@@ -90,16 +104,38 @@
           configurator: ansible
         annotations:
           ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    _current_ns: >-
+      {{ (_current_user_ns.results
+          | selectattr('item.key', 'equalto', item.key)
+          | map(attribute='resources')
+          | first | default([])
+          | first | default(none)) }}
   loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
   loop_control:
     label: "{{item.key}}"
+  when: _desired | k3s_content_changed(_current_ns)
+
+- name: get current namespace-owner Roles
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: rbac.authorization.k8s.io/v1
+    kind: Role
+    name: namespace-owner
+    namespace: "{{item.key}}"
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  register: _current_ns_roles
   when: _k3s_cfg.user_namespaces is defined
 
 - name: create namespace-owner Role in user namespaces
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition:
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: rbac.authorization.k8s.io/v1
       kind: Role
       metadata:
@@ -125,16 +161,38 @@
           resources: [ingressroutes, ingressroutetcps, ingressrouteudps,
                       middlewares, middlewaretcps, tlsstores, tlsoptions]
           verbs: [get, list, watch, create, update, patch, delete]
+    _current_role: >-
+      {{ (_current_ns_roles.results
+          | selectattr('item.key', 'equalto', item.key)
+          | map(attribute='resources')
+          | first | default([])
+          | first | default(none)) }}
   loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
   loop_control:
     label: "{{item.key}}"
+  when: _desired | k3s_content_changed(_current_role)
+
+- name: get current namespace-owner RoleBindings
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: rbac.authorization.k8s.io/v1
+    kind: RoleBinding
+    name: namespace-owner
+    namespace: "{{item.key}}"
+  loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  register: _current_ns_bindings
   when: _k3s_cfg.user_namespaces is defined
 
 - name: create namespace-owner RoleBinding in user namespaces
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition:
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: rbac.authorization.k8s.io/v1
       kind: RoleBinding
       metadata:
@@ -160,16 +218,42 @@
         kind: Role
         name: namespace-owner
         apiGroup: rbac.authorization.k8s.io
+    _current_binding: >-
+      {{ (_current_ns_bindings.results
+          | selectattr('item.key', 'equalto', item.key)
+          | map(attribute='resources')
+          | first | default([])
+          | first | default(none)) }}
   loop: "{{_k3s_cfg.user_namespaces | default({}) | dict2items}}"
   loop_control:
     label: "{{item.key}}"
+  when: _desired | k3s_content_changed(_current_binding)
+
+- name: get current user ClusterRoleBindings
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: rbac.authorization.k8s.io/v1
+    kind: ClusterRoleBinding
+    name: "k3s-user-base-{{item}}"
+  loop: >-
+    {{
+      _k3s_cfg.user_namespaces.values()
+      | map(attribute='users') | select('defined')
+      | flatten | unique
+    }}
+  loop_control:
+    label: "{{item}}"
+  register: _current_user_crb
   when: _k3s_cfg.user_namespaces is defined
 
 - name: create ClusterRoleBinding for explicitly listed namespace users
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition:
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
       apiVersion: rbac.authorization.k8s.io/v1
       kind: ClusterRoleBinding
       metadata:
@@ -186,6 +270,12 @@
         kind: ClusterRole
         name: k3s-user-base
         apiGroup: rbac.authorization.k8s.io
+    _current_crb: >-
+      {{ (_current_user_crb.results
+          | selectattr('item', 'equalto', item)
+          | map(attribute='resources')
+          | first | default([])
+          | first | default(none)) }}
   loop: >-
     {{
       _k3s_cfg.user_namespaces.values()
@@ -194,4 +284,4 @@
     }}
   loop_control:
     label: "{{item}}"
-  when: _k3s_cfg.user_namespaces is defined
+  when: _desired | k3s_content_changed(_current_crb)
