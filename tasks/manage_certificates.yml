@@ -1,0 +1,356 @@
+# Shared certificate management module.
+#
+# Creates or updates a k8s TLS Secret from passdb entries, with optional
+# auto-generation if passdb entries are empty. Optionally creates a Traefik
+# TLSStore referencing the Secret.
+#
+# This is consumed by deployments via include_tasks:
+#
+#   - name: manage TLS certificates
+#     include_tasks: manage_certificates.yml
+#     vars:
+#       _k3s_cert:
+#         name:         "management-tls"
+#         namespace:    "management"
+#         cert_passdb:  "k3s/management-cert"
+#         key_passdb:   "k3s/management-key"
+#         generate:       # Optional
+#           type:       "server"      # server | ca
+#           # For type: server (generate server cert signed by existing CA)
+#           ca_cert_passdb: "k3s/management-ca-cert"
+#           ca_key_passdb:  "k3s/management-ca-key"
+#           domains:      ["k3s.management.wachter.fi"]
+#           days:       365
+#           # For type: ca (generate self-signed CA cert)
+#           cn:         "k3s Management CA"
+#           key_bits:   4096
+#           key_passdb: "k3s/management-ca-key"
+#         tlsstore:     true          # create/update Traefik TLSStore
+#         tlsstore_name: "default"    # TLSStore name (default: default)
+#
+# When both tlsstore and tlsstore_name are omitted, no TLSStore is created.
+
+- name: check existing TLS cert in passdb ({{_k3s_cert.name}})
+  ansible.builtin.set_fact:
+    _k3s_cert_existing: "{{lookup(k3s_passdb, _k3s_cert.cert_passdb, missing='empty')}}"
+  when: _k3s_cert.cert_passdb is defined
+  no_log: true
+
+# --- Auto-generation: self-signed CA cert ---
+- name: generate self-signed CA cert ({{_k3s_cert.name}})
+  when:
+    - _k3s_cert.cert_passdb is defined
+    - _k3s_cert.generate is defined
+    - _k3s_cert_existing | default('') == ''
+    - _k3s_cert.generate.type | default('') == 'ca'
+  block:
+    - name: create temp dir for CA generation
+      ansible.builtin.tempfile:
+        state: directory
+      register: _k3s_cert_tmpdir
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: generate CA private key
+      ansible.builtin.command:
+        cmd: "openssl genrsa -out {{_k3s_cert_tmpdir.path}}/ca.key {{_k3s_cert.generate.key_bits | default(4096)}}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: generate self-signed CA certificate
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -x509
+          - -new
+          - -nodes
+          - -key
+          - "{{_k3s_cert_tmpdir.path}}/ca.key"
+          - -sha256
+          - -days
+          - "{{_k3s_cert.generate.days | default(3650)}}"
+          - -out
+          - "{{_k3s_cert_tmpdir.path}}/ca.crt"
+          - -subj
+          - "/CN={{_k3s_cert.generate.cn | default('k3s Management CA')}}"
+      delegate_to: localhost
+      run_once: true
+      changed_when: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: read generated CA cert
+      ansible.builtin.slurp:
+        src: "{{_k3s_cert_tmpdir.path}}/ca.crt"
+      register: _k3s_cert_ca_cert_b64
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: read generated CA key
+      ansible.builtin.slurp:
+        src: "{{_k3s_cert_tmpdir.path}}/ca.key"
+      register: _k3s_cert_ca_key_b64
+      delegate_to: localhost
+      run_once: true
+      no_log: true
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: store CA cert in passdb ({{_k3s_cert.cert_passdb}})
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _k3s_cert.cert_passdb, create=true, userpass=_k3s_cert_ca_cert_b64.content | b64decode)}}"
+      run_once: true
+      no_log: true
+
+    - name: store CA key in passdb ({{_k3s_cert.generate.key_passdb}})
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _k3s_cert.generate.key_passdb, create=true, userpass=_k3s_cert_ca_key_b64.content | b64decode)}}"
+      when: _k3s_cert.generate.key_passdb is defined
+      run_once: true
+      no_log: true
+
+    - name: remove CA generation temp dir
+      ansible.builtin.file:
+        path: "{{_k3s_cert_tmpdir.path}}"
+        state: absent
+      delegate_to: localhost
+      run_once: true
+      become: false
+      vars:
+        ansible_connection: local
+
+# --- Auto-generation: server cert signed by existing CA ---
+- name: generate signed server certificate ({{_k3s_cert.name}})
+  when:
+    - _k3s_cert.cert_passdb is defined
+    - _k3s_cert.generate is defined
+    - _k3s_cert_existing | default('') == ''
+    - _k3s_cert.generate.type | default('') == 'server'
+  block:
+    - name: create temp dir for server cert generation
+      ansible.builtin.tempfile:
+        state: directory
+      register: _k3s_cert_tmpdir
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: write CA cert to temp dir
+      ansible.builtin.copy:
+        content: "{{lookup(k3s_passdb, _k3s_cert.generate.ca_cert_passdb, returnall=true)}}"
+        dest: "{{_k3s_cert_tmpdir.path}}/ca.crt"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      vars:
+        ansible_connection: local
+
+    - name: write CA key to temp dir
+      ansible.builtin.copy:
+        content: "{{lookup(k3s_passdb, _k3s_cert.generate.ca_key_passdb, returnall=true)}}"
+        dest: "{{_k3s_cert_tmpdir.path}}/ca.key"
+        mode: "0600"
+      delegate_to: localhost
+      become: false
+      no_log: true
+      vars:
+        ansible_connection: local
+
+    - name: generate server private key
+      ansible.builtin.command:
+        cmd: "openssl genrsa -out {{_k3s_cert_tmpdir.path}}/server.key 4096"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      vars:
+        ansible_connection: local
+
+    - name: write SAN config
+      ansible.builtin.copy:
+        dest: "{{_k3s_cert_tmpdir.path}}/san.cnf"
+        mode: "0600"
+        content: |
+          [req]
+          req_extensions = v3_req
+          distinguished_name = req_distinguished_name
+          [req_distinguished_name]
+          [v3_req]
+          subjectAltName = @alt_names
+          [alt_names]
+          {% for domain in _k3s_cert.generate.domains %}
+          DNS.{{loop.index}} = {{domain}}
+          {% endfor %}
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: generate CSR
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - req
+          - -new
+          - -key
+          - "{{_k3s_cert_tmpdir.path}}/server.key"
+          - -out
+          - "{{_k3s_cert_tmpdir.path}}/server.csr"
+          - -subj
+          - "/CN={{_k3s_cert.generate.domains | first}}"
+          - -config
+          - "{{_k3s_cert_tmpdir.path}}/san.cnf"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      vars:
+        ansible_connection: local
+
+    - name: sign CSR with CA
+      ansible.builtin.command:
+        argv:
+          - openssl
+          - x509
+          - -req
+          - -in
+          - "{{_k3s_cert_tmpdir.path}}/server.csr"
+          - -CA
+          - "{{_k3s_cert_tmpdir.path}}/ca.crt"
+          - -CAkey
+          - "{{_k3s_cert_tmpdir.path}}/ca.key"
+          - -CAcreateserial
+          - -out
+          - "{{_k3s_cert_tmpdir.path}}/server.crt"
+          - -days
+          - "{{_k3s_cert.generate.days | default(365)}}"
+          - -sha256
+          - -extensions
+          - v3_req
+          - -extfile
+          - "{{_k3s_cert_tmpdir.path}}/san.cnf"
+      delegate_to: localhost
+      become: false
+      changed_when: true
+      vars:
+        ansible_connection: local
+
+    - name: read generated server cert
+      ansible.builtin.slurp:
+        src: "{{_k3s_cert_tmpdir.path}}/server.crt"
+      register: _k3s_cert_server_cert_b64
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+
+    - name: read generated server key
+      ansible.builtin.slurp:
+        src: "{{_k3s_cert_tmpdir.path}}/server.key"
+      register: _k3s_cert_server_key_b64
+      delegate_to: localhost
+      become: false
+      no_log: true
+      vars:
+        ansible_connection: local
+
+    - name: store server cert in passdb
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _k3s_cert.cert_passdb, create=true, userpass=_k3s_cert_server_cert_b64.content)}}"
+      no_log: true
+
+    - name: store server key in passdb
+      ansible.builtin.set_fact:
+        _dummy: "{{lookup(k3s_passdb, _k3s_cert.key_passdb, create=true, userpass=_k3s_cert_server_key_b64.content)}}"
+      when: _k3s_cert.key_passdb is defined
+      no_log: true
+
+    - name: remove server cert generation temp dir
+      ansible.builtin.file:
+        path: "{{_k3s_cert_tmpdir.path}}"
+        state: absent
+      delegate_to: localhost
+      become: false
+      vars:
+        ansible_connection: local
+
+# --- Create/update k8s TLS Secret ---
+- name: get current TLS Secret ({{_k3s_cert.name}})
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: v1
+    kind: Secret
+    name: "{{_k3s_cert.name}}"
+    namespace: "{{_k3s_cert.namespace}}"
+  register: _k3s_cert_current_secret
+  when: _k3s_cert.cert_passdb is defined and _k3s_cert.key_passdb is defined
+
+- name: create TLS Secret ({{_k3s_cert.name}})
+  no_log: true
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
+      apiVersion: v1
+      kind: Secret
+      type: kubernetes.io/tls
+      metadata:
+        name: "{{_k3s_cert.name}}"
+        namespace: "{{_k3s_cert.namespace}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+      data:
+        tls.crt: "{{lookup(k3s_passdb, _k3s_cert.cert_passdb)}}"
+        tls.key: "{{lookup(k3s_passdb, _k3s_cert.key_passdb)}}"
+  when: _k3s_cert.cert_passdb is defined and _k3s_cert.key_passdb is defined and _desired | k3s_content_changed(_k3s_cert_current_secret.resources[0] | default(none))
+
+# --- Optionally create/update Traefik TLSStore ---
+- name: get current Traefik TLSStore ({{_k3s_cert.tlsstore_name|default('default')}})
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: traefik.io/v1alpha1
+    kind: TLSStore
+    name: "{{_k3s_cert.tlsstore_name|default('default')}}"
+    namespace: "{{_k3s_cert.namespace}}"
+  register: _k3s_cert_current_tlsstore
+  when: _k3s_cert.tlsstore | default(false) | bool
+
+- name: create Traefik TLSStore ({{_k3s_cert.tlsstore_name|default('default')}})
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
+      apiVersion: traefik.io/v1alpha1
+      kind: TLSStore
+      metadata:
+        name: "{{_k3s_cert.tlsstore_name|default('default')}}"
+        namespace: "{{_k3s_cert.namespace}}"
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+      spec:
+        defaultCertificate:
+          secretName: "{{_k3s_cert.name}}"
+  when: _k3s_cert.tlsstore | default(false) | bool and _desired | k3s_content_changed(_k3s_cert_current_tlsstore.resources[0] | default(none))
