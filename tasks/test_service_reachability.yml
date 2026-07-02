@@ -7,6 +7,31 @@
   retries: 30
   delay: 10
 
+- name: check all nodes are Ready
+  ansible.builtin.fail:
+    msg: >-
+      Node(s) not Ready: {{ _cluster_nodes.resources
+         | selectattr('status.conditions', 'defined')
+         | list
+         | map(attribute='status.conditions')
+         | map('selectattr', 'type', 'equalto', 'Ready')
+         | map('first')
+         | selectattr('status', 'equalto', 'False')
+         | list
+         | map(attribute='__node_name')
+         | default([]) | list | join(', ') }}.
+      This may indicate broken node interconnectivity or a failed kubelet.
+      Fix the node before re-running, or bypass this check by setting:
+        k3s_skip_node_readiness_check: true
+  when: >
+    not (k3s_skip_node_readiness_check | default(false) | bool)
+    and _cluster_nodes.resources | selectattr('status.conditions', 'defined') | list
+    | map(attribute='status.conditions')
+    | map('selectattr', 'type', 'equalto', 'Ready')
+    | map('first')
+    | selectattr('status', 'equalto', 'False')
+    | list | length > 0
+
 - name: get kubernetes service ClusterIPs
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -38,6 +63,24 @@
     _svc_test_ips: >-
       {{ ((_svc_all_ips | ansible.utils.ipv4 | list) if 'IPv4' in _eps_families else [])
          + ((_svc_all_ips | ansible.utils.ipv6 | list) if 'IPv6' in _eps_families else []) }}
+
+- name: build node readiness map
+  set_fact:
+    _node_ready_map: >-
+      {{ _node_ready_map | default({})
+         | combine({item.metadata.name: ((item.status.conditions | default([])
+             | selectattr('type', 'equalto', 'Ready') | first)
+             | default({'status': 'Unknown'})).status})
+      }}
+  loop: "{{ _cluster_nodes.resources | selectattr('status.conditions', 'defined') | list }}"
+
+- name: filter test nodes to Ready nodes only
+  set_fact:
+    _test_nodes: >-
+      {{ _node_ready_map | dict2items
+         | selectattr('value', 'equalto', 'True')
+         | map(attribute='key')
+         | list }}
 
 - name: test service IP reachability from each node
   block:

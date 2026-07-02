@@ -12,9 +12,65 @@
 #   client-dmz     -> server-clustersvc:8080     expect: reachable  (cluster-service egress)
 #   client-dmz     -> server-default:8080        expect: blocked    (default deny)
 #
+# System / infrastructure tests:
+#   test pod       -> cluster DNS                 expect: reachable  (internal dns)
+#   test pod       -> external DNS                expect: reachable  (upstream dns, guarded)
+#   cert-manager   -> Kubernetes API server :443   expect: reachable  (https egress, guarded)
+#   cert-manager   -> ACME server :443            expect: reachable  (https egress, guarded)
+#   longhorn-system -> longhorn-backend :9500     expect: reachable  (intra-namespace)
+#   cert-manager   -> tinydns-sidecar :8080        expect: reachable  (cross-namespace service)
+#   kube-system    -> Kubernetes API server :443   expect: reachable  (infra pods need API)
+#   longhorn-system -> Kubernetes API server :443 expect: reachable  (longhorn-manager needs API)
+#
 # Variables:
-#   _np_test_namespace   override test namespace name (default: netpol-test)
-#   _np_internet_target  IP:port for internet reachability tests (default: 1.1.1.1 80)
+#   _np_test_namespace            override test namespace name (default: netpol-test)
+#   _np_internet_target_ip          IP for internet reachability tests (default: 1.1.1.1)
+#   _np_internet_target_port        port for internet reachability tests (default: 80)
+#   _np_test_external               run external connectivity tests (default: true)
+#   _np_test_acme_endpoint          ACME server to probe (default: acme-v02.api.letsencrypt.org)
+#   _np_test_dns_endpoint           DNS name to resolve externally (default: acme-v02.api.letsencrypt.org)
+
+- name: check for unavailable APIServices
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: APIService
+  register: _np_apiservices
+
+- name: fail fast if any APIService is unavailable
+  fail:
+    msg: >-
+      Unavailable APIService(s) detected — namespace deletion will hang,
+      breaking network policy tests. Fix before re-running:
+      {% for svc in _np_apiservices.resources | selectattr('status.conditions', 'defined') | list %}
+      {% set cond = (svc.status.conditions | default([]) | selectattr('type', 'equalto', 'Available') | list | first) | default(none) %}
+      {% if cond is not none and cond.status | default('') != 'True' %}
+      - {{ svc.metadata.name }}: {{ cond.reason | default('unknown') }} ({{ cond.message | default('no message') }})
+        Check pod in namespace {{ svc.spec.service.namespace | default('?') }}: kubectl -n {{ svc.spec.service.namespace | default('?') }} get pods
+      {% endif %}
+      {% endfor %}
+  when: >
+    _np_apiservices.resources | default([]) | selectattr('status.conditions', 'defined') | list
+    | map('extract', ['status', 'conditions']) | map('default', []) | flatten
+    | selectattr('type', 'equalto', 'Available') | selectattr('status', 'equalto', 'False') | list | length > 0
+
+- name: check if cert-manager namespace exists
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: cert-manager
+  register: _np_cert_manager_ns
+
+- name: check if longhorn-system namespace exists
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: longhorn-system
+  register: _np_longhorn_ns
+
+- name: set namespace existence flags
+  set_fact:
+    _np_cert_manager_ns_exists: "{{ (_np_cert_manager_ns.resources | default([])) | length > 0 }}"
+    _np_longhorn_ns_exists: "{{ (_np_longhorn_ns.resources | default([])) | length > 0 }}"
 
 - name: initialise test state
   set_fact:
@@ -22,6 +78,9 @@
     _np_inet_ip: "{{_np_internet_target_ip | default('1.1.1.1')}}"
     _np_inet_port: "{{_np_internet_target_port | default('80')}}"
     _np_test_results: []
+    _np_test_external: "{{ _k3s_cfg.network_policies.test_external_connectivity | default(true) }}"
+    _np_test_acme_endpoint: "{{ _k3s_cfg.network_policies.test_acme_endpoint | default('acme-v02.api.letsencrypt.org') }}"
+    _np_test_dns_endpoint: "{{ _k3s_cfg.network_policies.test_dns_endpoint | default('acme-v02.api.letsencrypt.org') }}"
 
 - name: network policy test run
   block:
@@ -63,7 +122,7 @@
             containers:
               - name: server
                 image: busybox
-                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\nOK' | nc -l -p 8080; done"]
+                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\r\n\r\nOK' | nc -l -p 8080; done"]
       changed_when: false
 
     - name: deploy server-default Service
@@ -102,7 +161,7 @@
             containers:
               - name: server
                 image: busybox
-                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\\r\\n\\r\\nOK' | nc -l -p 8080; done"]
+                command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\r\n\r\nOK' | nc -l -p 8080; done"]
       changed_when: false
 
     - name: deploy server-clustersvc Service
@@ -210,7 +269,7 @@
     # connection returns immediately; no sleep needed.
     # All tests use ignore_errors so every test runs before the summary.
 
-    - name: "test 1/6: default client -> cluster-service server (expect: reachable)"
+    - name: "test 1/14: default client -> cluster-service server (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -223,7 +282,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
       register: _np_t1
       ignore_errors: true
       changed_when: false
@@ -231,7 +290,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'default -> cluster-service', 'expect': 'reachable', 'pass': _np_t1.rc == 0, 'rc': _np_t1.rc}]}}"
 
-    - name: "test 2/6: default client -> default server (expect: blocked)"
+    - name: "test 2/14: default client -> default server (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -244,7 +303,7 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
       register: _np_t2
       ignore_errors: true
       changed_when: false
@@ -252,7 +311,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'default -> default server', 'expect': 'blocked', 'pass': _np_t2.rc != 0, 'rc': _np_t2.rc}]}}"
 
-    - name: "test 3/6: default client -> internet (expect: blocked)"
+    - name: "test 3/14: default client -> internet (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -265,7 +324,7 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
       register: _np_t3
       ignore_errors: true
       changed_when: false
@@ -273,7 +332,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'default -> internet', 'expect': 'blocked', 'pass': _np_t3.rc != 0, 'rc': _np_t3.rc}]}}"
 
-    - name: "test 4/6: dmz client -> internet (expect: reachable)"
+    - name: "test 4/14: dmz client -> internet (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -286,7 +345,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
       register: _np_t4
       ignore_errors: true
       changed_when: false
@@ -294,7 +353,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'dmz -> internet', 'expect': 'reachable', 'pass': _np_t4.rc == 0, 'rc': _np_t4.rc}]}}"
 
-    - name: "test 5/6: dmz client -> cluster-service server (expect: reachable)"
+    - name: "test 5/14: dmz client -> cluster-service server (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -307,7 +366,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
       register: _np_t5
       ignore_errors: true
       changed_when: false
@@ -315,7 +374,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'dmz -> cluster-service', 'expect': 'reachable', 'pass': _np_t5.rc == 0, 'rc': _np_t5.rc}]}}"
 
-    - name: "test 6/6: dmz client -> default server (expect: blocked)"
+    - name: "test 6/14: dmz client -> default server (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -328,7 +387,7 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
       register: _np_t6
       ignore_errors: true
       changed_when: false
@@ -336,19 +395,228 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'dmz -> default server', 'expect': 'blocked', 'pass': _np_t6.rc != 0, 'rc': _np_t6.rc}]}}"
 
+    # ── system / infrastructure tests ───────────────────────────────────────
+    # These use temporary busybox pods in real namespaces to verify that
+    # infrastructure components can communicate after policies are applied.
+
+    - name: "test 7/14: internal DNS resolution (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - "{{_np_test_ns}}"
+          - dns-test-internal
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - nslookup
+          - kubernetes.default.svc.cluster.local
+      register: _np_t7
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'internal DNS resolution', 'expect': 'reachable', 'pass': _np_t7.rc == 0, 'rc': _np_t7.rc}]}}"
+
+    - name: "test 8/14: external DNS resolution (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - "{{_np_test_ns}}"
+          - dns-test-external
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - nslookup
+          - "{{_np_test_dns_endpoint}}"
+      register: _np_t8
+      ignore_errors: true
+      changed_when: false
+      when: _np_test_external | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'external DNS resolution', 'expect': 'reachable', 'pass': (_np_t8.skipped | default(false)) or ((_np_t8.rc | default(-1)) == 0), 'rc': _np_t8.rc | default('skipped')}]}}"
+
+    - name: "test 9/14: API server HTTPS from cert-manager (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - cert-manager
+          - api-test-certmanager
+          - --image=busybox:1.36
+          - --restart=Never
+          - --labels=app.kubernetes.io/name=cert-manager
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+      register: _np_t9
+      ignore_errors: true
+      changed_when: false
+      when: _np_cert_manager_ns_exists | default(false) | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'API server HTTPS from cert-manager', 'expect': 'reachable', 'pass': (_np_t9.skipped | default(false)) or ((_np_t9.rc | default(-1)) == 0), 'rc': _np_t9.rc | default('skipped')}]}}"
+
+    - name: "test 10/14: cert-manager -> ACME server HTTPS (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - cert-manager
+          - cm-test-acme
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - "nc -z -w 5 {{_np_test_acme_endpoint}} 443"
+      register: _np_t10
+      ignore_errors: true
+      changed_when: false
+      when: _np_test_external | bool and _np_cert_manager_ns_exists | default(false) | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'cert-manager -> ACME HTTPS', 'expect': 'reachable', 'pass': (_np_t10.skipped | default(false)) or ((_np_t10.rc | default(-1)) == 0), 'rc': _np_t10.rc | default('skipped')}]}}"
+
+    - name: "test 11/14: longhorn intra-namespace (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - longhorn-system
+          - lh-test-internal
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - "wget -qO- --timeout=5 http://longhorn-backend:9500/v1 2>/dev/null | head -c 1 | grep -q '{'"
+      register: _np_t11
+      ignore_errors: true
+      changed_when: false
+      when: _np_longhorn_ns_exists | default(false) | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'longhorn intra-namespace', 'expect': 'reachable', 'pass': (_np_t11.skipped | default(false)) or ((_np_t11.rc | default(-1)) == 0), 'rc': _np_t11.rc | default('skipped')}]}}"
+
+    - name: "test 12/14: cert-manager -> tinydns-sidecar service (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - cert-manager
+          - cm-test-sidecar
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - "nc -z -w 5 tinydns-if1.netconf.svc.cluster.local 8080"
+      register: _np_t12
+      ignore_errors: true
+      changed_when: false
+      when: _np_cert_manager_ns_exists | default(false) | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'cert-manager -> tinydns-sidecar', 'expect': 'reachable', 'pass': (_np_t12.skipped | default(false)) or ((_np_t12.rc | default(-1)) == 0), 'rc': _np_t12.rc | default('skipped')}]}}"
+
+    - name: "test 13/14: kube-system -> Kubernetes API server (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - kube-system
+          - api-test-kubesystem
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+      register: _np_t13
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'kube-system -> Kubernetes API server', 'expect': 'reachable', 'pass': (_np_t13.skipped | default(false)) or ((_np_t13.rc | default(-1)) == 0), 'rc': _np_t13.rc | default('skipped')}]}}"
+
+    - name: "test 14/14: longhorn-system -> Kubernetes API server (expect: reachable)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - run
+          - -n
+          - longhorn-system
+          - api-test-longhorn
+          - --image=busybox:1.36
+          - --restart=Never
+          - --rm
+          - -i
+          - --
+          - sh
+          - "-c"
+          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+      register: _np_t14
+      ignore_errors: true
+      changed_when: false
+      when: _np_longhorn_ns_exists | default(false) | bool
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'longhorn-system -> Kubernetes API server', 'expect': 'reachable', 'pass': (_np_t14.skipped | default(false)) or ((_np_t14.rc | default(-1)) == 0), 'rc': _np_t14.rc | default('skipped')}]}}"
+
     # ── summary and assertion ───────────────────────────────────────────────
     - name: format test result lines
       set_fact:
         _np_summary_lines: "{{ (_np_summary_lines | default([])) + [line] }}"
       vars:
-        line: "  {{ '[PASS]' if item.pass else '[FAIL]' }} {{ item.name }}: expected {{ item.expect }}, rc={{ item.rc }}"
+        line: "  {{ '[PASS]' if item.pass else '[FAIL]' if item.rc != 'skipped' else '[SKIP]' }} {{ item.name }}: expected {{ item.expect }}{% if item.rc != 'skipped' %}, rc={{ item.rc }}{% else %} (skipped){% endif %}"
       loop: "{{_np_test_results}}"
       loop_control:
         label: "{{item.name}}"
 
     - name: network policy test summary
       debug:
-        msg: "{{ ['Network policy tests: ' ~ (_np_test_results | selectattr('pass', 'equalto', true) | list | length) ~ '/' ~ (_np_test_results | length) ~ ' passed'] + _np_summary_lines }}"
+        msg: "{{ ['Network policy tests: ' ~ (_np_test_results | selectattr('pass', 'equalto', true) | list | length) ~ '/' ~ (_np_test_results | list | length) ~ ' passed'] + _np_summary_lines }}"
 
     - name: assert all network policy tests passed
       assert:

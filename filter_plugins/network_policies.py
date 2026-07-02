@@ -2,6 +2,7 @@ class FilterModule(object):
     def filters(self):
         return {
             'k3s_np_expected_names':        self.k3s_np_expected_names,
+            'k3s_np_expected_names_system': self.k3s_np_expected_names_system,
             'k3s_np_labels':                self.k3s_np_labels,
             'k3s_np_effective_namespaces':  self.k3s_np_effective_namespaces,
         }
@@ -51,6 +52,37 @@ class FilterModule(object):
         names = [
             'default-deny-all',
             'allow-dns-egress',
+            'allow-cluster-services-egress',
+            'allow-cluster-services-ingress',
+        ]
+
+        for ns in np_cfg.get('system_namespaces', []):
+            names.append('allow-to-{}'.format(ns))
+            names.append('allow-from-{}'.format(ns))
+
+        if np_cfg.get('dmz_cidrs'):
+            names.extend(['allow-dmz-ingress', 'allow-dmz-egress'])
+
+        for vlan_name in np_cfg.get('service_vlans', {}):
+            names.append('allow-{}-ingress'.format(vlan_name))
+            names.append('allow-{}-access-egress'.format(vlan_name))
+
+        return names
+
+    def k3s_np_expected_names_system(self, np_cfg):
+        """Return the list of NetworkPolicy names that network-policies-system.yaml.j2
+        would generate for system namespaces.
+
+        Mirrors the template logic for system namespace policies.
+        """
+        names = [
+            'default-deny-all',
+            'allow-dns-egress',
+            'allow-node-network-ingress',
+            'allow-to-node-network',
+            'allow-intra-namespace',
+            'allow-coredns-upstream-egress',
+            'allow-cert-manager-https-egress',
             'allow-cluster-services-egress',
             'allow-cluster-services-ingress',
         ]

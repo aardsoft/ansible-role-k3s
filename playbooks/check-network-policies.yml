@@ -1,0 +1,278 @@
+# Check and report k3s NetworkPolicy state.
+#
+# Queries all NetworkPolicies in the cluster, identifies which are managed by
+# Ansible (configurator=ansible label), correlates them with VLAN configuration,
+# and reports missing or unexpected policies.
+#
+# Usage:
+#   ansible-playbook check-network-policies.yml
+#   ansible-playbook check-network-policies.yml -l <node>
+#
+# -l / --limit
+#   Restrict to a specific k3s cluster node.  Tasks only execute on the first
+#   server node, so without -l the play runs against all k3s_nodes but still
+#   only acts on the first server.
+
+- name: usage
+  hosts: localhost
+  gather_facts: false
+  tasks:
+    - name: check-network-policies playbook usage
+      debug:
+        msg:
+          - "k3s/playbooks/check-network-policies.yml — inspect NetworkPolicy state"
+          - ""
+          - "Options:"
+          - "  -l <node>    target a specific k3s node (tasks only run on first server)"
+          - ""
+          - "Examples:"
+          - "  ansible-playbook check-network-policies.yml -l k3sm3"
+
+- hosts: all,!k3s_pods,!k3s_pod_containers
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: data-utilities
+        tasks_from: check_versions
+      vars:
+        data_utilities_minver: 0.9
+    - include_role:
+        name: data-utilities
+        tasks_from: check_transactional
+    - include_role:
+        name: data-utilities
+        tasks_from: setup_passdb
+    - include_role:
+        name: data-utilities
+        tasks_from: default_variables
+
+- hosts: k3s_nodes
+  become: true
+  vars:
+    ansible_user: management
+  tasks:
+    - include_role:
+        name: k3s
+        tasks_from: setup_facts
+
+    - name: skip when network_policies not configured
+      meta: end_play
+      when: >
+        _k3s_cfg is not defined or
+        not (_first_server | default(false)) or
+        _k3s_cfg.network_policies is not defined
+
+    - name: query all namespaces
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Namespace
+      register: _npchk_all_namespaces
+
+    - name: compute effective namespace list
+      set_fact:
+        _npchk_namespaces: "{{_k3s_cfg.network_policies | k3s_np_effective_namespaces(
+            _npchk_all_namespaces.resources | default([]) | map(attribute='metadata.name') | list
+          )}}"
+
+    - name: query all network policies cluster-wide
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        api_version: networking.k8s.io/v1
+        kind: NetworkPolicy
+        namespace: "{{_ns}}"
+      loop: "{{_npchk_namespaces}}"
+      loop_control:
+        loop_var: _ns
+      register: _npchk_all_queries
+
+    - name: flatten policies
+      set_fact:
+        _npchk_all_policies: "{{_npchk_all_queries.results | map(attribute='resources') | flatten | list}}"
+
+    - name: build expected policy names
+      set_fact:
+        _npchk_expected_names: "{{_k3s_cfg.network_policies | k3s_np_expected_names}}"
+
+    - name: compute expected per-namespace policy list
+      set_fact:
+        _npchk_expected: "{{ (_npchk_expected | default([])) + [{'namespace': _ns, 'name': _name}] }}"
+      vars:
+        _ns: "{{item[0]}}"
+        _name: "{{item[1]}}"
+      loop: "{{_npchk_namespaces | product(_npchk_expected_names) | list}}"
+      loop_control:
+        label: "{{item[0]}}/{{item[1]}}"
+
+    - name: classify policies
+      set_fact:
+        _npchk_ansible: "{{_npchk_all_policies | selectattr('metadata.labels.configurator', 'equalto', 'ansible') | list}}"
+        _npchk_manual: "{{_npchk_all_policies | rejectattr('metadata.labels.configurator', 'equalto', 'ansible') | list}}"
+
+    - name: identify orphaned ansible-managed policies
+      set_fact:
+        _npchk_orphans: "{{ (_npchk_orphans | default([])) + [item] }}"
+      vars:
+        _fqn: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+      when: "item.metadata.name not in _npchk_expected_names"
+      loop: "{{_npchk_ansible}}"
+      loop_control:
+        label: "{{_fqn}}"
+
+    - name: identify missing expected policies
+      set_fact:
+        _npchk_missing: "{{ (_npchk_missing | default([])) + [item] }}"
+      vars:
+        _ns: "{{item.namespace}}"
+        _name: "{{item.name}}"
+        _fqn: "{{_ns}}/{{_name}}"
+        _found: "{{_npchk_all_policies | selectattr('metadata.namespace', 'equalto', _ns) | selectattr('metadata.name', 'equalto', _name) | list | length > 0}}"
+      when: "not _found"
+      loop: "{{_npchk_expected}}"
+      loop_control:
+        label: "{{_fqn}}"
+
+    - name: identify vlan-correlated policies
+      set_fact:
+        _npchk_vlan_policies: "{{ (_npchk_vlan_policies | default([])) + [item] }}"
+      vars:
+        _name: "{{item.metadata.name}}"
+        _vlan_match: "{{_name | regex_search('^allow-(.*)-(ingress|access-egress)$', '\\1')}}"
+        _dmz_match: "{{_name in ['allow-dmz-ingress', 'allow-dmz-egress']}}"
+      when: "_vlan_match | length > 0 or _dmz_match"
+      loop: "{{_npchk_all_policies}}"
+      loop_control:
+        label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+
+    - name: build report lines
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "{{item}}"
+      loop:
+        - ""
+        - "═══════════════════════════════════════════════════════════════════════════════"
+        - "  Network Policy Check Report"
+        - "═══════════════════════════════════════════════════════════════════════════════"
+        - ""
+        - "  Configuration:"
+        - "    Mode:        {{_k3s_cfg.network_policies.mode | default('whitelist')}}"
+        - "    Namespaces:  {{_npchk_namespaces | length}} effective"
+        - ""
+        - "  Summary:"
+        - "    Total policies:        {{_npchk_all_policies | length}}"
+        - "    Ansible-managed:       {{_npchk_ansible | length}}"
+        - "    Manual (non-ansible):  {{_npchk_manual | length}}"
+        - "    Missing expected:      {{_npchk_missing | default([]) | length}}"
+        - "    Orphaned ansible:      {{_npchk_orphans | default([]) | length}}"
+        - "    VLAN-correlated:       {{_npchk_vlan_policies | default([]) | length}}"
+        - ""
+        - "  ── Ansible-managed policies ────────────────────────────────────────────────"
+      loop_control:
+        label: "report-line"
+
+    - name: append ansible-managed policies to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        _fqn: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+        _orphan_marker: "{{ '[ORPHAN] ' if (item.metadata.name not in _npchk_expected_names) else '' }}"
+        line: "    {{_orphan_marker}}{{_fqn}}"
+      loop: "{{_npchk_ansible | sort(attribute='metadata.namespace,metadata.name') | list}}"
+      loop_control:
+        label: "{{_fqn}}"
+
+    - name: append manual policies to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        _fqn: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+        line: "    {{_fqn}}"
+      loop: "{{_npchk_manual | sort(attribute='metadata.namespace,metadata.name') | list}}"
+      loop_control:
+        label: "{{_fqn}}"
+      when: "_npchk_manual | length > 0"
+
+    - name: append vlan section to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "{{item}}"
+      loop:
+        - ""
+        - "  ── VLAN-correlated policies ──────────────────────────────────────────────"
+      loop_control:
+        label: "report-line"
+
+    - name: append vlan policies to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        _fqn: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+        _name: "{{item.metadata.name}}"
+        _vlan: "{{ _name | regex_replace('^allow-(.*)-(ingress|access-egress)$', '\\1') if _name.startswith('allow-') and not _name.startswith('allow-dmz-') else ('dmz' if _name.startswith('allow-dmz') else 'unknown') }}"
+        line: "    {{_fqn}}  →  vlan: {{_vlan}}"
+      loop: "{{_npchk_vlan_policies | default([]) | sort(attribute='metadata.namespace,metadata.name') | list}}"
+      loop_control:
+        label: "{{_fqn}}"
+
+    - name: append missing policies to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "{{item}}"
+      loop:
+        - ""
+        - "  ── Missing expected policies ─────────────────────────────────────────────"
+      loop_control:
+        label: "report-line"
+      when: "_npchk_missing | default([]) | length > 0"
+
+    - name: append missing entries to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "    MISSING: {{item.namespace}}/{{item.name}}"
+      loop: "{{_npchk_missing | default([])}}"
+      loop_control:
+        label: "{{item.namespace}}/{{item.name}}"
+      when: "_npchk_missing | default([]) | length > 0"
+
+    - name: append orphaned policies to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "{{item}}"
+      loop:
+        - ""
+        - "  ── Orphaned ansible-managed policies ─────────────────────────────────────"
+      loop_control:
+        label: "report-line"
+      when: "_npchk_orphans | default([]) | length > 0"
+
+    - name: append orphan entries to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "    ORPHAN:  {{item.metadata.namespace}}/{{item.metadata.name}}"
+      loop: "{{_npchk_orphans | default([])}}"
+      loop_control:
+        label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+      when: "_npchk_orphans | default([]) | length > 0"
+
+    - name: append footer to report
+      set_fact:
+        _npchk_report: "{{ (_npchk_report | default([])) + [line] }}"
+      vars:
+        line: "{{item}}"
+      loop:
+        - ""
+        - "═══════════════════════════════════════════════════════════════════════════════"
+        - ""
+      loop_control:
+        label: "report-line"
+
+    - name: print network policy report
+      debug:
+        msg: "{{_npchk_report | default(['No network policies found.'])}}"

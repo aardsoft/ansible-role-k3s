@@ -17,6 +17,37 @@
         _np_all_namespaces.resources | default([]) | map(attribute='metadata.name') | list
       )}}"
 
+# Fail fast if any target namespace is Terminating — creating resources there
+# returns 403 and usually means a previous test namespace is stuck because an
+# APIService (e.g. a cert-manager webhook) is unavailable.
+- name: query namespace statuses
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: "{{item}}"
+  loop: "{{_np_namespaces}}"
+  register: _np_namespace_statuses
+
+- name: check for terminating namespaces
+  set_fact:
+    _np_terminating: "{{ _np_namespace_statuses.results | default([]) | selectattr('resources', 'defined') | map(attribute='resources') | flatten | selectattr('status.phase', 'equalto', 'Terminating') | map(attribute='metadata.name') | list }}"
+
+- name: fail fast if any namespace is terminating
+  fail:
+    msg: >-
+      Namespace(s) in Terminating state: {{ _np_terminating | join(', ') }}.
+      Network policy deployment blocked — creating resources in a Terminating namespace returns 403.
+      Common cause: an APIService is unavailable, preventing namespace deletion from completing.
+      Diagnose:  kubectl get apiservice | grep -v True
+                 kubectl get namespace {{ _np_terminating | first }}
+      Fix options (pick one):
+        a) Fix the unavailable APIService (check its pod in the SERVICE column namespace)
+        b) Delete the broken APIService if it is not needed:
+             kubectl delete apiservice <name-from-diagnose>
+        c) Force-remove the namespace (workaround, does not fix root cause):
+             kubectl patch namespace {{ _np_terminating | first }} -p '{"metadata":{"finalizers":[]}}' --type=merge
+  when: _np_terminating | length > 0
+
 - name: query ansible-managed network policies
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -103,6 +134,8 @@
       metadata:
         name: "{{item.metadata.name}}"
         namespace: "{{item.metadata.namespace}}"
-  loop: "{{_np_excluded_queries.results | map(attribute='resources') | flatten | list}}"
+  loop: "{{_np_excluded_queries.results | map(attribute='resources') | flatten
+            | rejectattr('metadata.name', 'in', _k3s_cfg.network_policies | k3s_np_expected_names_system)
+            | list}}"
   loop_control:
     label: "{{item.metadata.namespace}}/{{item.metadata.name}}"

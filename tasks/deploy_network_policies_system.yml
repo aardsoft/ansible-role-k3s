@@ -1,0 +1,81 @@
+# Deploy network policies to system namespaces (kube-system, cert-manager, etc.)
+# These namespaces host core infrastructure and need baseline policies that
+# allow ingress from the node network so API server webhooks and kubelet
+# probes work.  This task runs early in deploy_on_first.yml before any
+# Helm charts deploy into system namespaces.
+
+- name: query existing namespaces
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+  register: _np_all_namespaces
+
+- name: compute existing system namespaces
+  set_fact:
+    _np_existing_system_ns: "{{ _np_all_namespaces.resources | map(attribute='metadata.name') | list | intersect(_k3s_cfg.network_policies.system_namespaces | default([])) }}"
+
+- name: skip system policies when no namespaces exist yet
+  debug:
+    msg: "No system namespaces exist yet, skipping system network policy deployment"
+  when: _np_existing_system_ns | length == 0
+
+- name: query ansible-managed policies in system namespaces
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    namespace: "{{_ns}}"
+    label_selectors:
+      - "configurator=ansible"
+  loop: "{{_np_existing_system_ns}}"
+  loop_control:
+    loop_var: _ns
+  register: _np_sys_queries
+  when: _np_existing_system_ns | length > 0
+
+- name: index ansible-managed system policies by namespace/name
+  set_fact:
+    _np_sys_existing: >-
+      {{ _np_sys_queries.results | map(attribute='resources') | flatten
+         | k3s_ns_resource_index }}
+  when: _np_existing_system_ns | length > 0
+
+- name: build desired system namespace policies
+  set_fact:
+    _np_sys_desired: "{{ lookup('template', 'network-policies-system.yaml.j2') | from_yaml_all | select('mapping') | list }}"
+  vars:
+    _np_namespaces: "{{_np_existing_system_ns}}"
+    _np_cfg: "{{_k3s_cfg.network_policies}}"
+    _k3s_cluster_cidr: "{{_k3s_cfg.cluster_cidr | default('')}}"
+  when: _np_existing_system_ns | length > 0
+
+- name: deploy system namespace network policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_np_resource}}"
+  loop: "{{_np_sys_desired | default([])}}"
+  loop_control:
+    loop_var: _np_resource
+  when: >
+    _np_existing_system_ns | length > 0 and
+    _np_resource | k3s_content_changed(
+      _np_sys_existing[_np_resource.metadata.namespace ~ '/' ~ _np_resource.metadata.name] | default(none))
+
+- name: remove stale ansible-managed policies from system namespaces
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{item.metadata.namespace}}"
+  loop: "{{_np_sys_queries.results | default([]) | map(attribute='resources') | flatten
+            | rejectattr('metadata.name', 'in', _k3s_cfg.network_policies | k3s_np_expected_names_system)
+            | list}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+  when: _np_existing_system_ns | length > 0
