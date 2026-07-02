@@ -42,3 +42,8 @@
     ansible_all_ipv4_addresses is defined and
     _k3s_cfg is defined and
     _k3s_cfg.first_server in ansible_all_ipv4_addresses
+
+- name: determine if cluster network policies are active
+  set_fact:
+    _k3s_np_enabled: "{{ _k3s_cfg.network_policies is defined and (_k3s_cfg.network_policies.state | default('present')) == 'present' }}"
+  when: _k3s_cfg is defined
