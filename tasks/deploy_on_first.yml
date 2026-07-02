@@ -55,6 +55,14 @@
     _k3s_cfg.kured.state is defined and
     _k3s_cfg.kured.state == 'absent'
 
+# Deploy baseline network policies to system namespaces after core components
+# have created their namespaces (e.g. cert-manager via Helm), but before any
+# task that relies on API server webhooks (e.g. Issuer creation).
+- include_tasks: deploy_network_policies_system.yml
+  when: >
+    _k3s_cfg.network_policies is defined and
+    _k3s_cfg.network_policies.state | default('present') == 'present'
+
 - name: manage k3s server manifests
   include_tasks: manage_server_manifests.yml
   when: _k3s_cfg.server_manifests is defined
