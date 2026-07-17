@@ -1,0 +1,149 @@
+# Configure cert-manager Issuers and Certificates based on cluster config.
+#
+# Input from _k3s_cfg.cert_manager.issuers and _k3s_cfg.cert_manager.certificates.
+#
+# Uses the same query + k3s_content_changed pattern as network policies so
+# volatile annotations (ansible.run-id) do not cause spurious changed reports.
+
+# ── Issuers ────────────────────────────────────────────────────────────────────
+
+- name: query existing Issuers
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: cert-manager.io/v1
+    kind: Issuer
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+  register: _cm_issuers_existing
+  when: _k3s_cfg.cert_manager.issuers is defined
+
+- name: query existing ClusterIssuers
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: cert-manager.io/v1
+    kind: ClusterIssuer
+  register: _cm_cluster_issuers_existing
+  when: _k3s_cfg.cert_manager.issuers is defined
+
+- name: index existing issuers by kind/name
+  set_fact:
+    _cm_issuers_index: >-
+      {{ (_cm_issuers_existing.resources | default([]) +
+          _cm_cluster_issuers_existing.resources | default([]))
+         | k3s_resource_index }}
+  when: _k3s_cfg.cert_manager.issuers is defined
+
+- name: build desired issuers
+  set_fact:
+    _cm_desired_issuers: "{{ _cm_desired_issuers | default([]) +
+                            [lookup('template', 'cert-manager-issuer.yaml.j2') | from_yaml] }}"
+  vars:
+    _issuer_key: "{{item.key}}"
+    _issuer_value: "{{item.value}}"
+  loop: "{{_k3s_cfg.cert_manager.issuers|default({})|dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  when: _k3s_cfg.cert_manager.issuers is defined
+
+- name: apply cert-manager Issuers
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{item}}"
+  loop: "{{_cm_desired_issuers|default([])}}"
+  loop_control:
+    label: "{{item.metadata.name}}"
+  when: >
+    item | k3s_content_changed(
+      _cm_issuers_index[item.kind ~ '/' ~ item.metadata.name] | default(none))
+
+# ── Certificates ───────────────────────────────────────────────────────────────
+
+- name: query existing Certificates
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: cert-manager.io/v1
+    kind: Certificate
+    namespace: "{{item.value.namespace}}"
+  loop: "{{_k3s_cfg.cert_manager.certificates|default({})|dict2items}}"
+  loop_control:
+    label: "{{item.value.namespace}}/{{item.key}}"
+  register: _cm_certs_existing
+  when: _k3s_cfg.cert_manager.certificates is defined
+
+- name: index existing certificates by namespace/name
+  set_fact:
+    _cm_certs_index: >-
+      {{ _cm_certs_existing.results | default([]) | map(attribute='resources') | flatten
+         | k3s_ns_resource_index }}
+  when: _k3s_cfg.cert_manager.certificates is defined
+
+- name: build desired certificates
+  set_fact:
+    _cm_desired_certs: "{{ _cm_desired_certs | default([]) +
+                          [lookup('template', 'cert-manager-certificate.yaml.j2') | from_yaml] }}"
+  vars:
+    _cert_key: "{{item.key}}"
+    _cert_value: "{{item.value}}"
+    _issuer_cluster_issuer: "{{_k3s_cfg.cert_manager.issuers[item.value.issuer].cluster_issuer | default(false)}}"
+  loop: "{{_k3s_cfg.cert_manager.certificates|default({})|dict2items}}"
+  loop_control:
+    label: "{{item.key}}"
+  when: _k3s_cfg.cert_manager.certificates is defined
+
+- name: apply cert-manager Certificates
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{item}}"
+  loop: "{{_cm_desired_certs|default([])}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+  when: >
+    item | k3s_content_changed(
+      _cm_certs_index[item.metadata.namespace ~ '/' ~ item.metadata.name] | default(none))
+
+# ── Traefik default TLSStore ───────────────────────────────────────────────────
+# When a wildcard certificate covers all management hostnames, create a default
+# TLSStore in kube-system (Traefik's namespace) so every Ingress with
+# router.tls: "true" gets a valid cert without needing an explicit spec.tls block.
+
+- name: get current Traefik default TLSStore
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: traefik.io/v1alpha1
+    kind: TLSStore
+    name: default
+    namespace: kube-system
+  register: _cm_tlsstore_current
+  when: >
+    _k3s_cfg.cert_manager is defined and
+    _k3s_cfg.cert_manager.default_tls_secret is defined
+
+- name: create Traefik default TLSStore for cert-manager wildcard
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_desired}}"
+  vars:
+    _desired:
+      apiVersion: traefik.io/v1alpha1
+      kind: TLSStore
+      metadata:
+        name: default
+        namespace: kube-system
+        labels:
+          configurator: ansible
+        annotations:
+          ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+          ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+          ansible.version: "{{ansible_version.full}}"
+      spec:
+        defaultCertificate:
+          secretName: "{{_k3s_cfg.cert_manager.default_tls_secret}}"
+  when: >
+    _k3s_cfg.cert_manager is defined and
+    _k3s_cfg.cert_manager.default_tls_secret is defined and
+    _desired | k3s_content_changed(_cm_tlsstore_current.resources[0] | default(none))

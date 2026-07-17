@@ -1,0 +1,136 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: cert-manager-webhook-tinydns
+  namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-webhook-tinydns:domain-solver
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+rules:
+  - apiGroups: ["{{_k3s_cfg.cert_manager.tinydns_webhook.group_name|default('acme.webhook-tinydns.aardsoft.fi')}}"]
+    resources: ["*"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-webhook-tinydns:domain-solver
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-webhook-tinydns:domain-solver
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager-webhook-tinydns
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+---
+# Grant the cert-manager controller permission to create resources in our webhook
+# API group (e.g. tinydns resources that the webhook exposes). Without this,
+# the controller cannot delegate DNS-01 challenges to the webhook.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: cert-manager-webhook-tinydns:api-access
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+rules:
+  - apiGroups: ["{{_k3s_cfg.cert_manager.tinydns_webhook.group_name|default('acme.webhook-tinydns.aardsoft.fi')}}"]
+    resources: ["*"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: cert-manager-webhook-tinydns:api-access
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: cert-manager-webhook-tinydns:api-access
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+---
+# Allow the webhook to read the extension-apiserver-authentication ConfigMap
+# in kube-system.  The Kubernetes generic apiserver library uses this to
+# validate client certificates presented by the kube-aggregator during
+# APIService discovery.  Without this permission the webhook returns 403
+# for discovery requests and the APIService never becomes Available.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: cert-manager-webhook-tinydns:configmap-reader
+  namespace: kube-system
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["extension-apiserver-authentication"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: cert-manager-webhook-tinydns:configmap-reader
+  namespace: kube-system
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: cert-manager-webhook-tinydns:configmap-reader
+subjects:
+  - kind: ServiceAccount
+    name: cert-manager-webhook-tinydns
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+

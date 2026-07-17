@@ -1,0 +1,32 @@
+- name: deploy cert-manager via Helm
+  kubernetes.core.helm:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+    create_namespace: true
+    name: cert-manager
+    chart_ref: cert-manager
+    chart_repo_url: "https://charts.jetstack.io"
+    chart_version: "{{_k3s_cfg.cert_manager.version|default(omit)}}"
+    values:
+      installCRDs: "{{_k3s_cfg.cert_manager.crds|default(true)|bool}}"
+  when: _k3s_cfg.cert_manager.state|default('present') == 'present'
+
+- name: wait for cert-manager webhook to be ready
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Deployment
+    name: cert-manager-webhook
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+  register: _cert_manager_webhook
+  until: >
+    _cert_manager_webhook.resources | length > 0 and
+    (_cert_manager_webhook.resources[0].status.availableReplicas | default(0)) > 0
+  retries: 24
+  delay: 5
+  when: _k3s_cfg.cert_manager.state|default('present') == 'present'
+
+- name: deploy tinydns webhook for cert-manager
+  include_tasks: deploy_cert_manager_webhook.yml
+  when: >
+    _k3s_cfg.cert_manager.state|default('present') == 'present' and
+    _k3s_cfg.cert_manager.tinydns_webhook is defined

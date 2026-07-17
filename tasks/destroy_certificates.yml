@@ -1,0 +1,23 @@
+# Shared certificate cleanup module.
+#
+# Removes a k8s TLS Secret and optionally a Traefik TLSStore by name.
+# Consumed via include_tasks with _k3s_cert dict (same shape as manage_certificates.yml).
+
+- name: remove TLS Secret ({{_k3s_cert.name}})
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    api_version: v1
+    kind: Secret
+    name: "{{_k3s_cert.name}}"
+    namespace: "{{_k3s_cert.namespace}}"
+
+- name: remove Traefik TLSStore ({{_k3s_cert.tlsstore_name|default('default')}})
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    api_version: traefik.io/v1alpha1
+    kind: TLSStore
+    name: "{{_k3s_cert.tlsstore_name|default('default')}}"
+    namespace: "{{_k3s_cert.namespace}}"
+  when: _k3s_cert.tlsstore | default(false) | bool

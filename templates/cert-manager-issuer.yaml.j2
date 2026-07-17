@@ -1,0 +1,44 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+apiVersion: cert-manager.io/v1
+kind: "{{'ClusterIssuer' if (_issuer_value.cluster_issuer | default(false)) else 'Issuer'}}"
+metadata:
+  name: "{{_issuer_key}}"
+{% if not (_issuer_value.cluster_issuer | default(false)) %}
+  namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+{% endif %}
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+spec:
+  acme:
+    server: "{{_issuer_value.server}}"
+    email: "{{_issuer_value.email}}"
+    privateKeySecretRef:
+      name: "{{_issuer_key}}-account-key"
+    solvers:
+{% if _issuer_value.challenge == 'http-01' %}
+      - http01:
+          ingress:
+            class: "{{_issuer_value.ingress_class|default('traefik')}}"
+{% elif _issuer_value.challenge == 'dns-01' and _issuer_value.dns_provider == 'webhook' %}
+      - dns01:
+          webhook:
+            groupName: "{{_issuer_value.webhook.groupName}}"
+            solverName: "{{_issuer_value.webhook.solverName}}"
+            config:
+              {{_issuer_value.webhook.config | default({}) | to_nice_yaml | indent(14)}}
+{% elif _issuer_value.challenge == 'dns-persist-01' %}
+      - dns01:
+          # dns-persist-01 uses a persistent TXT record; cert-manager
+          # will check _validation-persist.<domain> for the account URI
+          # No provider config needed - the record is pre-provisioned in DNS
+          # This is a custom webhook approach falling back to dns01 while
+          # we wait for persist support in letsencrypt and cert-manager
+          webhook:
+            groupName: acme.dns-persist.io
+            solverName: dns-persist-01
+            config:
+              issuerDomainName: "{{_issuer_value.issuer_domain_name}}"
+              accountURI: "{{_issuer_value.account_uri}}"
+{% endif %}

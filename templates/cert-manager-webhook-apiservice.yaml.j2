@@ -1,0 +1,21 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1alpha1.{{_k3s_cfg.cert_manager.tinydns_webhook.group_name|default('acme.webhook-tinydns.aardsoft.fi')}}
+  labels:
+    app: cert-manager-webhook-tinydns
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  group: {{_k3s_cfg.cert_manager.tinydns_webhook.group_name|default('acme.webhook-tinydns.aardsoft.fi')}}
+  version: v1alpha1
+  insecureSkipTLSVerify: true
+  service:
+    name: cert-manager-webhook-tinydns
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+  groupPriorityMinimum: 1000
+  versionPriority: 15

@@ -1,0 +1,19 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "{{_cert_key}}"
+  namespace: "{{_cert_value.namespace}}"
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+spec:
+  secretName: "{{_cert_value.secret_name}}"
+  issuerRef:
+    name: "{{_cert_value.issuer}}"
+    kind: "{{'ClusterIssuer' if (_issuer_cluster_issuer | default(false)) else 'Issuer'}}"
+  dnsNames:
+{% for name in _cert_value.dns_names %}
+    - "{{name}}"
+{% endfor %}

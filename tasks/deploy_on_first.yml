@@ -55,6 +55,18 @@
     _k3s_cfg.kured.state is defined and
     _k3s_cfg.kured.state == 'absent'
 
+- include_tasks: deploy_cert_manager.yml
+  when: >
+    _k3s_cfg.cert_manager is defined and
+    _k3s_cfg.cert_manager.state is defined and
+    _k3s_cfg.cert_manager.state == 'present'
+
+- include_tasks: destroy_cert_manager.yml
+  when: >
+    _k3s_cfg.cert_manager is defined and
+    _k3s_cfg.cert_manager.state is defined and
+    _k3s_cfg.cert_manager.state == 'absent'
+
 # Deploy baseline network policies to system namespaces after core components
 # have created their namespaces (e.g. cert-manager via Helm), but before any
 # task that relies on API server webhooks (e.g. Issuer creation).
@@ -62,6 +74,12 @@
   when: >
     _k3s_cfg.network_policies is defined and
     _k3s_cfg.network_policies.state | default('present') == 'present'
+
+- include_tasks: configure_cert_manager.yml
+  when: >
+    _k3s_cfg.cert_manager is defined and
+    _k3s_cfg.cert_manager.state is defined and
+    _k3s_cfg.cert_manager.state == 'present'
 
 - name: manage k3s server manifests
   include_tasks: manage_server_manifests.yml

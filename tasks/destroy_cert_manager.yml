@@ -1,0 +1,27 @@
+- name: remove tinydns webhook resources
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: "{{item.apiVersion}}"
+      kind: "{{item.kind}}"
+      metadata:
+        name: "{{item.name}}"
+        namespace: "{{item.namespace|default(omit)}}"
+  loop:
+    - {apiVersion: v1, kind: Secret, name: cert-manager-webhook-tinydns, namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"}
+    - {apiVersion: v1, kind: Deployment, name: cert-manager-webhook-tinydns, namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"}
+    - {apiVersion: v1, kind: Service, name: cert-manager-webhook-tinydns, namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"}
+    - {apiVersion: v1, kind: ServiceAccount, name: cert-manager-webhook-tinydns, namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"}
+    - {apiVersion: rbac.authorization.k8s.io/v1, kind: ClusterRole, name: "cert-manager-webhook-tinydns:domain-solver"}
+    - {apiVersion: rbac.authorization.k8s.io/v1, kind: ClusterRoleBinding, name: "cert-manager-webhook-tinydns:domain-solver"}
+    - {apiVersion: apiregistration.k8s.io/v1, kind: APIService, name: v1alpha1.acme.cert-manager-webhook-tinydns.aardsoft.github.io}
+  when: _k3s_cfg.cert_manager.state|default('present') == 'absent'
+
+- name: remove cert-manager Helm release
+  kubernetes.core.helm:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    namespace: "{{_k3s_cfg.cert_manager.namespace|default('cert-manager')}}"
+    name: cert-manager
+    state: absent
+  when: _k3s_cfg.cert_manager.state|default('present') == 'absent'
