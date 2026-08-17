@@ -16,9 +16,8 @@
 #
 # To limit to a specific deployment, set k3s_deployment_limit to a
 # deployment name matching a key under k3s.deployments in group_vars.
-# The deployments loop does not currently support filtering by name —
-# use this to skip the playbook overhead for unrelated deployments if
-# the full run is slow.
+# Multiple names can be comma-separated.
+#
 
 - name: usage
   hosts: localhost
@@ -34,6 +33,8 @@
           - ""
           - "Examples:"
           - "  ansible-playbook deployments.yml -l k3sm3"
+          - "  ansible-playbook deployments.yml -l k3sm3 -e k3s_deployment_limit=rabbitmq"
+          - "  ansible-playbook deployments.yml -l k3sm3 -e 'k3s_deployment_limit=rabbitmq,management-ui'"
 
 - hosts: all,!k3s_pods,!k3s_pod_containers
   become: true
@@ -76,4 +77,6 @@
       when: >
         _k3s_cfg is defined and
         _first_server | default(false) and
-        _k3s_cfg.deployments is defined
+        _k3s_cfg.deployments is defined and
+        (k3s_deployment_limit is undefined or
+         _deployment.key in (k3s_deployment_limit.split(',') if k3s_deployment_limit is string else k3s_deployment_limit))
