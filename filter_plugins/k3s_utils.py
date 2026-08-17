@@ -19,6 +19,12 @@ _META_RUNTIME_KEYS = frozenset({
     'managedFields', 'selfLink', 'ownerReferences',
 })
 
+# Kind-specific fields managed by the cluster that should be ignored during
+# content comparison (e.g. Kubernetes injects .secrets into ServiceAccounts).
+_KIND_RUNTIME_KEYS = {
+    'ServiceAccount': frozenset({'secrets', 'imagePullSecrets'}),
+}
+
 
 def _strip_volatile_annots(node, key):
     """Strip volatile annotations from node[key] in-place, ignoring missing paths."""
@@ -132,8 +138,11 @@ class FilterModule(object):
         if b_meta != d_meta:
             return True
 
-        # Compare all content fields (skip metadata and status)
-        skip = {'metadata', 'status', 'apiVersion', 'kind'}
+        # Compare all content fields (skip metadata, status, and kind-specific
+        # runtime fields such as ServiceAccount .secrets)
+        kind = desired.get('kind') or baseline.get('kind')
+        kind_specific_skip = _KIND_RUNTIME_KEYS.get(kind, frozenset())
+        skip = {'metadata', 'status', 'apiVersion', 'kind'} | kind_specific_skip
         for key in (set(baseline) | set(d)) - skip:
             if baseline.get(key) != d.get(key):
                 return True
