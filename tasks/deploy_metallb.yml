@@ -19,6 +19,7 @@
       {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
           _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
          | items2dict }}
+    _bfd_profiles: "{{_k3s_cfg.metallb.bfd_profiles|default({})}}"
   changed_when: false
   when: _k3s_debug_path is defined
 
@@ -34,6 +35,7 @@
     _pools: "{{_k3s_cfg.metallb.pools|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
     _advertisements: "{{_k3s_cfg.metallb.advertisements|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
     _bgp_peers: "{{_k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|selectattr('value.state','equalto','absent')|items2dict}}"
+    _bfd_profiles: "{{_k3s_cfg.metallb.bfd_profiles|default({})}}"
   changed_when: false
   when: _k3s_debug_path is defined
 
@@ -111,6 +113,7 @@
       {{ (_k3s_cfg.metallb.bgp_peers|default({})|dict2items|rejectattr('value.state','defined')|list +
           _k3s_cfg.metallb.bgp_peers|default({})|dict2items|selectattr('value.state','defined')|rejectattr('value.state','equalto','absent')|list)
          | items2dict }}
+    _bfd_profiles: "{{_k3s_cfg.metallb.bfd_profiles|default({})}}"
 
 # .. and loop over it to check for each element if we need to apply a changei
 - name: deploy metallb pools

@@ -52,6 +52,24 @@ spec:
 {% endif %}
 ---
 {% endfor %}
+{% for profile in _bfd_profiles|default({}) %}
+apiVersion: metallb.io/v1beta1
+kind: BFDProfile
+metadata:
+  name: {{_bfd_profiles[profile].name|default(profile)}}
+  namespace: metallb-system
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+{% for key, value in (_bfd_profiles[profile].spec|default({})).items() %}
+  {{ key }}: {{ value }}
+{% endfor %}
+---
+{% endfor %}
 {% for peer in _bgp_peers %}
 apiVersion: metallb.io/v1beta1
 kind: BGPPeer
@@ -69,5 +87,14 @@ spec:
   peerASN: {{_bgp_peers[peer].peerASN|default(64512)}}
   myASN: {{_bgp_peers[peer].myASN|default(64513)}}
   ttl: {{_bgp_peers[peer].ttl|default(255)}}
+{% if _bgp_peers[peer].holdTime is defined %}
+  holdTime: {{_bgp_peers[peer].holdTime}}
+{% endif %}
+{% if _bgp_peers[peer].keepaliveTime is defined %}
+  keepaliveTime: {{_bgp_peers[peer].keepaliveTime}}
+{% endif %}
+{% if _bgp_peers[peer].bfdProfile is defined %}
+  bfdProfile: {{_bgp_peers[peer].bfdProfile}}
+{% endif %}
 ---
 {% endfor %}
