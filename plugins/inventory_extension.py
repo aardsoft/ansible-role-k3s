@@ -25,6 +25,7 @@ Lifecycle hooks called by the plugin:
 import os
 import re
 
+import jinja2
 from ansible.template import Templar
 from ansible.utils.unsafe_proxy import wrap_var
 
@@ -74,8 +75,16 @@ class InventoryExtension:
             return None
 
         try:
-            templar = Templar(loader=plugin.loader, variables=render_vars)
-            rendered = templar.template(raw, fail_on_undefined=True)
+            # Use Jinja2 directly with the role's templates directory in the
+            # search path so {% include %} can resolve sibling templates
+            # (e.g. init-scripts/*.sh.j2).
+            template_dir = os.path.join(role_path, 'templates')
+            env = jinja2.Environment(
+                loader=jinja2.FileSystemLoader(template_dir),
+                undefined=jinja2.StrictUndefined,
+            )
+            template = env.get_template('k3s-pod.yml.j2')
+            rendered = template.render(render_vars)
         except Exception as e:
             parser['errors'].append(
                 "Pod snippet: failed to render '%s/templates/k3s-pod.yml.j2': %s"
@@ -231,10 +240,31 @@ class InventoryExtension:
 
         # Merge snippets in order: each successive snippet overrides earlier ones.
         merged_pod = {}
+        merged_k3s = {}
+        snippet_role_paths = {}
         for role_name in snippets:
+            role_path = plugin._find_role_path(role_name)
             snippet = self._load_pod_snippet(plugin, role_name, render_vars, parser)
             if snippet and 'pod' in snippet:
                 merged_pod = self._merge_pod_sections(merged_pod, snippet['pod'])
+            if snippet and 'k3s' in snippet and isinstance(snippet['k3s'], dict):
+                merged_k3s.update(snippet['k3s'])
+            if role_path:
+                snippet_role_paths[role_name] = role_path
+
+        # Apply snippet k3s keys into host k3s (host explicit values win)
+        host_k3s = host_def.get('k3s') or {}
+        for k3s_key, k3s_val in merged_k3s.items():
+            if k3s_key not in host_k3s:
+                data[valid_keys['hosts']][host].setdefault('k3s', {})[k3s_key] = k3s_val
+
+        # Expose discovered snippet role paths so playbook tasks can locate
+        # role-specific files (e.g. deploy_container.yml) without hardcoding
+        # a specific roles directory layout.
+        data[valid_keys['hosts']][host].setdefault('host_vars', {})['_snippet_role_paths'] = snippet_role_paths
+        # Also expose at host top-level so it travels with network_pods when
+        # the pod host is iterated on a cluster node (not in host scope there).
+        data[valid_keys['hosts']][host]['_snippet_role_paths'] = snippet_role_paths
 
         # Apply the host's own pod section last so it always wins.
         host_pod = host_def.get('pod') or {}
@@ -245,7 +275,7 @@ class InventoryExtension:
         ''' Normalise k3s-pod network interfaces.
 
         1. Synthesizes an addresses dict from ipv4/ipv6 scalar keys on each
-           interface in pod.network if addresses is not already explicitly set.
+           interface in host_def.networks if addresses is not already explicitly set.
            This mirrors what site_yaml does for server networks keys, letting
            complex consumers (pod-service template, etc.) always work off
            addresses while simple roles continue using ipv4/ipv6 directly.
@@ -256,7 +286,7 @@ class InventoryExtension:
            in network_policies.service_vlans and built-in zones (dmz, etc.).
            Explicitly configured network_policy_labels are preserved. '''
 
-        network = host_def.get('network')
+        network = host_def.get('networks')
         if not network or not isinstance(network, dict):
             return
 
@@ -272,7 +302,7 @@ class InventoryExtension:
                 if iface.get('ipv6') is not None:
                     synthesized[iface['ipv6']] = {}
                 if synthesized:
-                    data[k['hosts']][host]['network'][if_key]['addresses'] = synthesized
+                    data[k['hosts']][host]['networks'][if_key]['addresses'] = synthesized
             # Collect vlan names for network policy label derivation
             vlan = iface.get('vlan')
             if vlan:

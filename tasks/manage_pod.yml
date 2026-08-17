@@ -6,7 +6,7 @@
     _pod_name: "{{_pod.key}}"
     _pod_namespace: "{{(_pod.value.k3s|default({})).namespace|default(_pod.key)}}"
     _pod_containers: "{{(_pod.value.pod|default({})).containers|default({})}}"
-    _pod_networks: "{{_pod.value.network|default({})}}"
+    _pod_networks: "{{_pod.value.networks|default({})}}"
     _pod_labels: "{{((_pod.value.k3s|default({})).labels|default({})) | combine(_pod.value.k3s|default({}) | k3s_np_labels)}}"
     _pod_volumes: "{{(_pod.value.pod|default({})).volumes|default([])}}"
     _pod_workload_type: "{{(_pod.value.k3s|default({})).workload_type|default('Deployment')}}"
