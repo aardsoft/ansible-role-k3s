@@ -1,0 +1,37 @@
+{# Generic Kubernetes manifest wrapper.
+   Expected variables from _template_cfg (all keys passed through):
+     apiVersion  -- required
+     kind        -- required
+     metadata    -- required dict; .name is preserved, .labels/.annotations merged
+     <any>       -- all other top-level keys (spec, data, rules, subjects, …)
+   Injected automatically:
+     namespace   -- always set to _pod_namespace
+     labels      -- app: _pod_name, configurator: ansible
+     annotations -- ansible.run-id, ansible.config_file, ansible.version
+#}
+{% set _meta = _template_cfg.metadata | default({}) %}
+apiVersion: {{ _template_cfg.apiVersion }}
+kind: {{ _template_cfg.kind }}
+metadata:
+  name: {{ _meta.name }}
+  namespace: {{ _pod_namespace }}
+{% for k, v in _meta.items() if k not in ['name', 'namespace', 'labels', 'annotations'] %}
+  {{ k }}: {{ v | to_yaml(width=99999) | trim }}
+{% endfor %}
+  labels:
+    app: {{ _pod_name }}
+    configurator: ansible
+{% for k, v in (_meta.labels | default({})).items() %}
+    {{ k }}: "{{ v }}"
+{% endfor %}
+  annotations:
+    ansible.run-id: "{{ ansible_run_id | default('N/A') }}"
+    ansible.config_file: "{{ ansible_config_file | default('N/A') }}"
+    ansible.version: "{{ ansible_version.full }}"
+{% for k, v in (_meta.annotations | default({})).items() %}
+    {{ k }}: "{{ v }}"
+{% endfor %}
+{% for key in (_template_cfg.keys() | list) if key not in ['template', 'apiVersion', 'kind', 'metadata'] %}
+{{ key }}:
+{{ _template_cfg[key] | to_nice_yaml | indent(2) }}
+{% endfor %}

@@ -1,0 +1,61 @@
+{# Render a Traefik Ingress manifest.
+   Expected variables from _template_cfg:
+     host          -- FQDN for the Ingress rule (required)
+     service_name  -- backend Service name (default: _pod_name ~ '-' ~ _iface_key)
+     service_port  -- backend Service port number (default: 80)
+     path          -- URL path (default: /)
+     path_type     -- pathType (default: Prefix)
+     entrypoints   -- Traefik entrypoints annotation (default: dmz,dmz-secure)
+     tls           -- boolean, add Traefik router TLS annotation (default: false)
+     tls_secret    -- TLS secret name for spec.tls block (optional; when tls=true
+                      but tls_secret is omitted, Traefik uses its default
+                      certificate from the cluster TLSStore — the secret must
+                      live in the same namespace as the Ingress for standard
+                      Kubernetes Ingress, or in kube-system for Traefik's
+                      default TLSStore to apply cluster-wide)
+     extra_annotations -- free-form dict of additional annotations
+#}
+{% set _svc_name = _template_cfg.service_name | default(_pod_name ~ '-' ~ _template_cfg.iface | default('if1')) %}
+{% set _svc_port = _template_cfg.service_port | default(80) %}
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: "{{ _template_cfg.name | default(_pod_name) }}"
+  namespace: "{{ _pod_namespace }}"
+  labels:
+    app: "{{ _pod_name }}"
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ ansible_run_id | default('N/A') }}"
+    ansible.config_file: "{{ ansible_config_file | default('N/A') }}"
+    ansible.version: "{{ ansible_version.full }}"
+    traefik.ingress.kubernetes.io/router.entrypoints: "{{ _template_cfg.entrypoints | default('dmz,dmz-secure') }}"
+{% if _template_cfg.tls | default(false) %}
+    traefik.ingress.kubernetes.io/router.tls: "true"
+{% endif %}
+{% for k, v in (_template_cfg.extra_annotations | default({})).items() %}
+    {{ k }}: "{{ v }}"
+{% endfor %}
+spec:
+{% set _hosts = [_template_cfg.host] + (_template_cfg.extra_hosts | default([])) %}
+{% if _template_cfg.tls | default(false) and _template_cfg.tls_secret | default('') | length > 0 %}
+  tls:
+    - hosts:
+{% for h in _hosts %}
+        - "{{ h }}"
+{% endfor %}
+      secretName: "{{ _template_cfg.tls_secret }}"
+{% endif %}
+  rules:
+{% for h in _hosts %}
+    - host: "{{ h }}"
+      http:
+        paths:
+          - path: "{{ _template_cfg.path | default('/') }}"
+            pathType: "{{ _template_cfg.path_type | default('Prefix') }}"
+            backend:
+              service:
+                name: "{{ _svc_name }}"
+                port:
+                  number: {{ _svc_port }}
+{% endfor %}

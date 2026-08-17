@@ -1,0 +1,28 @@
+{# Render a cert-manager Certificate manifest.
+   Expected variables from _template_cfg:
+     dns_names    -- list of DNS names (required)
+     secret_name  -- Secret to store the certificate in (required)
+     issuer_name  -- Issuer reference name (default: letsencrypt-prod)
+     issuer_kind  -- Issuer or ClusterIssuer (default: ClusterIssuer)
+#}
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: "{{ _template_cfg.secret_name | default(_template_cfg.name) | default(_pod_name) }}"
+  namespace: "{{ _pod_namespace }}"
+  labels:
+    app: "{{ _pod_name }}"
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ ansible_run_id | default('N/A') }}"
+    ansible.config_file: "{{ ansible_config_file | default('N/A') }}"
+    ansible.version: "{{ ansible_version.full }}"
+spec:
+  secretName: "{{ _template_cfg.secret_name }}"
+  issuerRef:
+    name: "{{ _template_cfg.issuer_name | default('letsencrypt-prod') }}"
+    kind: "{{ _template_cfg.issuer_kind | default('ClusterIssuer') }}"
+  dnsNames:
+{% for dns in _template_cfg.dns_names %}
+    - "{{ dns }}"
+{% endfor %}

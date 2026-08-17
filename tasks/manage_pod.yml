@@ -18,6 +18,7 @@
     _pod_init_containers: "{{(_pod.value.pod|default({})).initContainers|default([])}}"
     _pod_manifest: "{{(_pod.value.pod|default({})).manifest|default(false)}}"
     _pod_selector: "{{(_pod.value.k3s|default({})).selector|default({'app': _pod.key})}}"
+    _pod_extra_templates: "{{(_pod.value.pod|default({})).extra_manifest_templates|default([])}}"
 
 - name: "get current namespace ({{_pod_name}})"
   kubernetes.core.k8s_info:
@@ -48,6 +49,41 @@
   when: >
     _pod_namespace != 'default' and
     _desired | k3s_content_changed((_current_pod_namespace.resources | default([]))[0] | default(none))
+
+- name: "set snippet role paths from pod data ({{_pod_name}})"
+  set_fact:
+    _snippet_role_paths: "{{_pod.value._snippet_role_paths | default({})}}"
+
+- name: "DEBUG snippet role paths ({{_pod_name}})"
+  debug:
+    msg:
+      - "pod_name: {{ _pod_name }}"
+      - "snippets: {{ (_pod.value.k3s | default({})).snippets | default([]) }}"
+      - "_snippet_role_paths: {{ _snippet_role_paths }}"
+      - "_pod.value._snippet_role_paths: {{ _pod.value._snippet_role_paths | default('UNDEFINED') }}"
+
+# Promote pod host_vars into the local variable scope so snippet roles
+# (e.g. cms-grav/deploy_container.yml) can access passdb paths, git repo
+# URLs, and other per-pod variables without reaching into hostvars.
+- name: "set pod host vars as facts ({{_pod_name}})"
+  set_fact:
+    "{{ item.key }}": "{{ item.value }}"
+  with_dict: "{{ _pod.value.host_vars | default({}) }}"
+
+# Snippet roles may provide additional tasks (e.g. Secret creation, pre-deploy
+# checks) beyond the pod definition itself.  Include each snippet role's
+# deploy_container.yml if it exists, silently skipping roles that don't.
+- name: "include snippet role tasks ({{_pod_name}})"
+  include_role:
+    name: "{{_snippet_role}}"
+    tasks_from: deploy_container
+  loop: "{{(_pod.value.k3s|default({})).snippets|default([])}}"
+  loop_control:
+    loop_var: _snippet_role
+  when: >
+    _snippet_role_paths is defined and
+    _snippet_role_paths[_snippet_role] is defined and
+    (_snippet_role_paths[_snippet_role] ~ '/tasks/deploy_container.yml') is file
 
 # Pre-fetch all existing ConfigMaps for this pod once.  Used for both
 # content-change comparison below (to avoid spurious pod restarts from
@@ -304,10 +340,46 @@
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
     apply: yes
-    definition: "{{item | from_yaml if item is string else item}}"
+    definition: "{{_extra_item | from_yaml if _extra_item is string else _extra_item}}"
   loop: "{{(_pod.value.pod|default({})).extra_manifests|default([])}}"
   loop_control:
-    label: "{{(item | from_yaml if item is string else item).metadata.name | default('unnamed')}}"
+    loop_var: _extra_item
+    label: "{{(_extra_item | from_yaml if _extra_item is string else _extra_item).metadata.name | default('unnamed')}}"
+
+# Render extra_manifest_templates from Jinja2 templates in
+# templates/extra-manifests/<name>.j2 and apply the resulting manifests.
+- name: "render extra manifest templates for pod ({{_pod_name}})"
+  set_fact:
+    _extra_template_results: "{{ _extra_template_results | default([]) + [_rendered] }}"
+  vars:
+    _template_cfg: "{{ _tmpl_item }}"
+    _rendered: "{{ lookup('template', 'extra-manifests/' + _tmpl_item.name + '.j2') | from_yaml }}"
+  loop: "{{ _pod_extra_templates }}"
+  loop_control:
+    loop_var: _tmpl_item
+    label: "{{ _tmpl_item.name }}"
+
+- name: "push extra manifest templates for debug ({{_pod_name}})"
+  become: false
+  connection: local
+  local_action:
+    module: ansible.builtin.copy
+    mode: 0600
+    content: "{{ _extra_template_results | to_nice_yaml }}"
+    dest: "{{_k3s_debug_path}}/{{_pod_name}}-extra-templates.yaml"
+  changed_when: false
+  when: _k3s_debug_path is defined and _extra_template_results | default([]) | length > 0
+
+- name: "apply extra manifest templates for pod ({{_pod_name}})"
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_tmpl_result}}"
+  loop: "{{ _extra_template_results | default([]) }}"
+  loop_control:
+    loop_var: _tmpl_result
+    label: "{{_tmpl_result.metadata.name | default('unnamed')}}"
 
 - name: "warn if no containers or manifest defined ({{_pod_name}})"
   debug:
