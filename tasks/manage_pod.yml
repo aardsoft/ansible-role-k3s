@@ -509,10 +509,22 @@
   set_fact:
     _expected_service_names: >-
       {{ _pod_networks | dict2items
-         | selectattr('value.addresses', 'defined')
+         | selectattr('value.ports', 'defined')
          | map(attribute='key')
          | map('regex_replace', '^', _pod_name ~ '-')
-         | list }}
+         | list +
+         _pod_networks | dict2items
+         | selectattr('value.links', 'defined')
+         | map(attribute='key')
+         | map('regex_replace', '^', _pod_name ~ '-')
+         | list +
+         _pod_networks | dict2items
+         | selectattr('value.link', 'defined')
+         | selectattr('value.link', 'in', _pod_containers)
+         | map(attribute='key')
+         | map('regex_replace', '^', _pod_name ~ '-')
+         | list
+         | unique }}
 
 # Delete services that are stale (removed from config) or that use the
 # deprecated spec.loadBalancerIP field instead of the metallb annotation.
@@ -532,14 +544,17 @@
     label: "{{item.metadata.name}}"
   when: >
     item.metadata.name not in _expected_service_names or
-    'metallb.universe.tf/loadBalancerIPs' not in (item.metadata.annotations | default({}))
+    ((item.spec.type | default('')) == 'LoadBalancer' and
+     'metallb.universe.tf/loadBalancerIPs' not in (item.metadata.annotations | default({})))
 
-# Create LoadBalancer services for each network interface that has an IP and ports configured.
+# Create services for each network interface that has ports configured.
+# Service type is LoadBalancer when addresses are present (metallb-backed),
+# otherwise ClusterIP for internal-only exposure (e.g. via Ingress/Traefik).
 # Port sources in order of precedence:
 #   ports:  explicit list on the interface itself (use with pod.manifest)
 #   links:  list of container names; ports collected from each (simple mode)
 #   link:   single container name; ports collected from it (simple mode)
-- name: "deploy LoadBalancer service for external IP ({{_pod_name}})"
+- name: "deploy service for network interface ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
@@ -552,8 +567,6 @@
   loop_control:
     loop_var: _network_iface
   when: >
-    _network_iface.value.addresses is defined and
-    _network_iface.value.addresses | length > 0 and
     (_network_iface.value.ports is defined or
      (_network_iface.value.link is defined and
       _network_iface.value.link in _pod_containers and
@@ -564,13 +577,11 @@
 
 - name: "note interfaces without port configuration ({{_pod_name}})"
   debug:
-    msg: "Interface {{_network_iface.key}} on pod {{_pod_name}} has no port configuration in container {{_network_iface.value.link|default('(no link)')}}, skipping LoadBalancer service"
+    msg: "Interface {{_network_iface.key}} on pod {{_pod_name}} has no port configuration in container {{_network_iface.value.link|default('(no link)')}}, skipping service"
   with_dict: "{{_pod_networks}}"
   loop_control:
     loop_var: _network_iface
   when: >
-    _network_iface.value.addresses is defined and
-    _network_iface.value.addresses | length > 0 and
     _network_iface.value.ports is undefined and
     _network_iface.value.links is undefined and
     ((_network_iface.value.link is undefined) or

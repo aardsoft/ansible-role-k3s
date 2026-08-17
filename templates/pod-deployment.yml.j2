@@ -82,7 +82,49 @@ spec:
 {% for mount in ic.volumeMounts %}
         - name: {{mount.name}}
           mountPath: {{mount.mountPath}}
+{% if mount.subPath is defined %}
+          subPath: {{mount.subPath}}
+{% endif %}
+{% if mount.readOnly is defined %}
+          readOnly: {{mount.readOnly | lower}}
+{% endif %}
 {% endfor %}
+{% endif %}
+{% if ic.securityContext is defined %}
+        securityContext:
+{% if ic.securityContext.runAsUser is defined %}
+          runAsUser: {{ic.securityContext.runAsUser}}
+{% endif %}
+{% if ic.securityContext.runAsGroup is defined %}
+          runAsGroup: {{ic.securityContext.runAsGroup}}
+{% endif %}
+{% if ic.securityContext.runAsNonRoot is defined %}
+          runAsNonRoot: {{ic.securityContext.runAsNonRoot | lower}}
+{% endif %}
+{% if ic.securityContext.readOnlyRootFilesystem is defined %}
+          readOnlyRootFilesystem: {{ic.securityContext.readOnlyRootFilesystem | lower}}
+{% endif %}
+{% if ic.securityContext.allowPrivilegeEscalation is defined %}
+          allowPrivilegeEscalation: {{ic.securityContext.allowPrivilegeEscalation | lower}}
+{% endif %}
+{% if ic.securityContext.privileged is defined %}
+          privileged: {{ic.securityContext.privileged | lower}}
+{% endif %}
+{% if ic.securityContext.capabilities is defined %}
+          capabilities:
+{% if ic.securityContext.capabilities.add is defined %}
+            add:
+{% for cap in ic.securityContext.capabilities.add %}
+            - {{cap}}
+{% endfor %}
+{% endif %}
+{% if ic.securityContext.capabilities.drop is defined %}
+            drop:
+{% for cap in ic.securityContext.capabilities.drop %}
+            - {{cap}}
+{% endfor %}
+{% endif %}
+{% endif %}
 {% endif %}
 {% endfor %}
 {% endif %}

@@ -32,6 +32,7 @@ metadata:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
     ansible.version: "{{ansible_version.full}}"
+{% if _has_v4 or _has_v6 %}
 {% if _has_v4 and _has_v6 %}
     metallb.universe.tf/loadBalancerIPs: "{{_ans.v4[0] | regex_replace('/.*$', '')}},{{_ans.v6[0] | regex_replace('/.*$', '')}}"
 {% elif _has_v4 %}
@@ -39,8 +40,13 @@ metadata:
 {% elif _has_v6 %}
     metallb.universe.tf/loadBalancerIPs: "{{_ans.v6[0] | regex_replace('/.*$', '')}}"
 {% endif %}
+{% endif %}
 spec:
+{% if _has_v4 or _has_v6 %}
   type: LoadBalancer
+{% if _network_iface.value.externalTrafficPolicy is defined %}
+  externalTrafficPolicy: {{_network_iface.value.externalTrafficPolicy}}
+{% endif %}
 {% if _has_v4 and _has_v6 %}
   ipFamilyPolicy: RequireDualStack
   ipFamilies:
@@ -54,6 +60,9 @@ spec:
   ipFamilyPolicy: SingleStack
   ipFamilies:
   - IPv6
+{% endif %}
+{% else %}
+  type: ClusterIP
 {% endif %}
   selector:
 {% for _sel_key, _sel_val in _pod_selector.items() %}
