@@ -47,3 +47,39 @@
   set_fact:
     _k3s_np_enabled: "{{ _k3s_cfg.network_policies is defined and (_k3s_cfg.network_policies.state | default('present')) == 'present' }}"
   when: _k3s_cfg is defined
+
+# Fail fast if the current play targets hosts from more than one k3s cluster.
+# This prevents accidental cross-cluster operations when multiple clusters
+# share the same parent group (e.g. k3s_nodes).
+- name: detect clusters in current play
+  ansible.builtin.set_fact:
+    _clusters_in_play: >-
+      {{
+        ansible_play_hosts_all
+        | map('extract', hostvars, 'k3s_cluster')
+        | select('defined')
+        | list
+        | unique
+      }}
+  delegate_to: localhost
+  become: false
+  run_once: true
+  changed_when: false
+
+- name: assert single cluster target
+  ansible.builtin.assert:
+    that: _clusters_in_play | length == 1
+    fail_msg: >
+      Multiple k3s clusters targeted in the same play: {{ _clusters_in_play | join(', ') }}.
+
+      This playbook can only target one cluster at a time.
+      Use a cluster-specific group or limit to avoid cross-cluster operations:
+
+        ansible-playbook <playbook> -l k3s_core_nodes
+        ansible-playbook <playbook> -l k3s_staging_nodes
+
+      Or use --limit with explicit host names from a single cluster.
+    success_msg: "Targeting cluster: {{ _clusters_in_play | first }}"
+  delegate_to: localhost
+  become: false
+  run_once: true
