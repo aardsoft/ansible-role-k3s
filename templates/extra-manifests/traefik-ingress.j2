@@ -13,6 +13,12 @@
                       live in the same namespace as the Ingress for standard
                       Kubernetes Ingress, or in kube-system for Traefik's
                       default TLSStore to apply cluster-wide)
+     manifest_name -- Ingress object name (optional; default: the entry's
+                      `name`, i.e. the template selector). Required to be
+                      distinct when a pod has more than one traefik-ingress
+                      entry — otherwise both renders produce the same
+                      Ingress object and the later one overwrites the
+                      earlier (observed with webhooks-build on 2026-09-29)
      extra_annotations -- free-form dict of additional annotations
 #}
 {% set _svc_name = _template_cfg.service_name | default(_pod_name ~ '-' ~ _template_cfg.iface | default('if1')) %}
@@ -20,7 +26,7 @@
 apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
-  name: "{{ _template_cfg.name | default(_pod_name) }}"
+  name: "{{ _template_cfg.manifest_name | default(_template_cfg.name | default(_pod_name)) }}"
   namespace: "{{ _pod_namespace }}"
   labels:
     app: "{{ _pod_name }}"
