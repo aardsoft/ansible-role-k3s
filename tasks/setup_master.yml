@@ -6,6 +6,9 @@
   ansible.builtin.copy:
     content: |
       INSTALL_K3S_EXEC='{{_k3s_args}}'
+      {% if _k3s_cfg.version is defined %}
+      INSTALL_K3S_VERSION='{{_k3s_cfg.version}}'
+      {% endif %}
       {% if _k3s_cfg.channel is defined %}
       INSTALL_K3S_CHANNEL='{{_k3s_cfg.channel}}'
       {% endif %}
@@ -15,9 +18,7 @@
 
 - name: run k3s installer (master)
   ansible.builtin.shell: "{{_k3s_installer}}"
-  environment:
-    INSTALL_K3S_EXEC: "{{_k3s_args}}"
-    INSTALL_K3S_CHANNEL: "{{_k3s_cfg.channel | default('stable')}}"
+  environment: "{{_k3s_install_env}}"
   register: _master_install_status
 
 - name: Reboot transactional system

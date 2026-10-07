@@ -16,6 +16,7 @@
 
 - set_fact:
     _k3s_installer: "{{local_bin|default('/usr/local/bin')}}/k3s_installer.sh"
+    _k3s_binary_dest: "{{local_bin|default('/usr/local/bin')}}/k3s"
 
 - name: pull node token
   slurp:
@@ -39,6 +40,21 @@
   when: >
     k3s_role|default('agent') == 'agent' and
     ansible_facts['services']['k3s-agent.service']['status'] | default('not-found') != 'enabled'
+
+# When a specific k3s version is pinned (air-gapped / reproducible installs),
+# download the binary from the configured URL so the installer can use it
+# without reaching the internet.  The installer itself still runs and handles
+# systemd unit creation, SELinux policies, etc.
+- name: download pinned k3s binary
+  ansible.builtin.get_url:
+    url: "{{ _k3s_cfg.binary_url }}"
+    dest: "{{ _k3s_binary_dest }}"
+    mode: '0755'
+    owner: root
+  when: >
+    _k3s_cfg.binary_url is defined and
+    (_node_uninitialized | default(false) or
+     k3s_upgrade | default(false) | bool)
 
 - name: rotate journals before install
   ansible.builtin.command: journalctl --rotate
@@ -283,6 +299,25 @@
 - set_fact:
     _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode={{_k3s_cfg.kubeconfig_mode|default('0600')}}"
   when: _first_server == true and not (_k3s_cfg.use_config_file | default(false))
+
+# Build the installer environment variables once so both setup_master.yml
+# and setup_additional.yml can reuse them without duplicating logic.
+- set_fact:
+    _k3s_install_env:
+      INSTALL_K3S_EXEC: "{{ _k3s_args }}"
+  when: _k3s_install_env is undefined
+
+- set_fact:
+    _k3s_install_env: "{{ _k3s_install_env | combine({'INSTALL_K3S_VERSION': _k3s_cfg.version}) }}"
+  when: _k3s_cfg.version is defined
+
+- set_fact:
+    _k3s_install_env: "{{ _k3s_install_env | combine({'INSTALL_K3S_CHANNEL': _k3s_cfg.channel}) }}"
+  when: _k3s_cfg.channel is defined
+
+- set_fact:
+    _k3s_install_env: "{{ _k3s_install_env | combine({'INSTALL_K3S_SKIP_DOWNLOAD': 'true'}) }}"
+  when: _k3s_cfg.binary_url is defined
 
 - name: init server certs change tracker
   ansible.builtin.set_fact:
