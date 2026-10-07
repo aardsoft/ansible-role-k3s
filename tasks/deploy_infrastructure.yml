@@ -1,3 +1,11 @@
+# Core infrastructure deployment tasks for k3s clusters.
+# These run on the first server only and establish the cluster's
+# foundational components before any user workloads are deployed.
+#
+# Included from tasks/main.yml when 'infrastructure' is in _k3s_phases.
+#
+# This is pretty much a more polished variant of the old deploy_on_first
+
 # if we've come that far we should have a basic cluster running, so dump info
 - name: get Cluster information
   kubernetes.core.k8s_info:
@@ -101,31 +109,3 @@
 # an override option.
 - name: fix kyverno webhook if blocking
   include_tasks: fix_kyverno_webhook.yml
-
-- name: run extra deployments
-  include_tasks: "deployments.yml"
-  with_dict: "{{_k3s_cfg.deployments|default({})}}"
-  loop_control:
-    loop_var: _deployment
-
-- name: manage k3s pods
-  include_tasks: manage_pods.yml
-  when: network_pods is defined
-
-# Network policies are applied last so pod label updates from manage_pods and
-# extra deployments above are already in place when policies take effect.
-- include_tasks: deploy_network_policies.yml
-  when: >
-    _k3s_cfg.network_policies is defined and
-    _k3s_cfg.network_policies.state | default('present') == 'present'
-
-- include_tasks: test_network_policies.yml
-  when: >
-    _k3s_cfg.network_policies is defined and
-    _k3s_cfg.network_policies.state | default('present') == 'present' and
-    (_k3s_cfg.network_policies.run_tests | default(false) or k3s_run_tests | default(false))
-
-- include_tasks: remove_network_policies.yml
-  when: >
-    _k3s_cfg.network_policies is defined and
-    _k3s_cfg.network_policies.state | default('present') == 'absent'

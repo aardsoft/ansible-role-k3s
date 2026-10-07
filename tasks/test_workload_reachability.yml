@@ -1,0 +1,175 @@
+# Workload reachability tests — run AFTER deployments.
+#
+# The built-in network policy test matrix (test_network_policies.yml) runs in
+# the infrastructure phase against a dedicated test namespace and covers the
+# policy machinery itself (default-deny, cluster-service, dmz, DNS, API
+# server).  Probes that depend on deployed WORKLOADS cannot run that early:
+# on a fresh cluster the target services do not exist yet.  This file runs
+# after the applications phase and contains only standalone probes
+# (kubectl run --rm, no test namespace) that reach real deployed services.
+#
+# Clusters add cluster-specific checks via network_policies.reachability_tests
+# entries in the cluster config:
+#
+#   network_policies:
+#     reachability_tests:            # each: kubectl run probe
+#       - name: cert-manager -> tinydns-sidecar      # free-form display name
+#         namespace: cert-manager                    # probe pod namespace
+#         labels:                                    # probe pod labels — give the probe the
+#           app.kubernetes.io/name: cert-manager     # labels of a real client pod so its
+#         host: tinydns-if1.netconf.svc.cluster.local # egress rules match; omit for plain
+#         port: 8080                                 # namespace-baseline egress
+#         expect: reachable                          # or 'blocked' (egress/ingress denied)
+#         image: busybox:1.36                        # optional probe image override
+#
+# The tinydns sidecar thing is a special case - we're currently assuming that
+# every cluster will end up with that for DNS publishing, so we add some config
+# around that to make it cluster agnostic. We probably would need to check
+# that against a cluster with no tinydns at all as well.
+
+# ---------------------------------------------------------------------------
+# tinydns sidecarURL probes (cert-manager issuers)
+# ---------------------------------------------------------------------------
+- name: collect configured sidecarURL targets from cert-manager issuers
+  set_fact:
+    _np_sidecar_targets: >-
+      {%- set _targets = {} -%}
+      {%- for _iss in (_k3s_cfg.cert_manager.issuers | default({})).values() -%}
+        {%- if _iss.webhook is defined
+               and _iss.webhook.config.sidecarURL is defined -%}
+          {%- set _hostport = (_iss.webhook.config.sidecarURL.split('://') | last).split('/') | first -%}
+          {%- set _host = _hostport.split(':')[0] -%}
+          {%- set _port = _hostport.split(':')[1] | default(80) -%}
+          {%- set _ = _targets.update({_host ~ ':' ~ _port: {'host': _host, 'port': _port}}) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ _targets.values() | list }}
+  when: _k3s_cfg.cert_manager is defined
+
+- name: check if cert-manager namespace exists
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    kind: Namespace
+    name: cert-manager
+  register: _wr_cert_manager_ns
+
+- name: set cert-manager probe namespace flag
+  set_fact:
+    _wr_cert_manager_ns_exists: "{{ (_wr_cert_manager_ns.resources | default([])) | length > 0 }}"
+
+- name: probe sidecarURL targets with cert-manager-labelled pod
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/kubectl
+      - "--kubeconfig"
+      - "{{_k3s_kubecfg}}"
+      - run
+      - -n
+      - cert-manager
+      - wr-test-sidecar-{{_sidecar_target.port}}
+      - --image=busybox:1.36
+      - --restart=Never
+      - --rm
+      - -i
+      - --labels
+      - app.kubernetes.io/name=cert-manager
+      - --
+      - sh
+      - "-c"
+      - "n=0; until nc -z -w 5 {{_sidecar_target.host}} {{_sidecar_target.port}}; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
+  loop: "{{_np_sidecar_targets | default([])}}"
+  loop_control:
+    loop_var: _sidecar_target
+    label: "{{_sidecar_target.host}}:{{_sidecar_target.port}}"
+  register: _wr_sidecar_results
+  ignore_errors: true
+  changed_when: false
+  when:
+    - _wr_cert_manager_ns_exists | bool
+    - _np_sidecar_targets | default([]) | length > 0
+
+- name: record sidecarURL test results
+  set_fact:
+    _wr_test_results: "{{_wr_test_results | default([]) + [{
+      'name': 'cert-manager -> tinydns sidecarURL (' ~ _sidecar_target.host ~ ':' ~ _sidecar_target.port ~ ')',
+      'expect': 'reachable',
+      'pass': (_wr_sidecar_results.results[_wr_idx].rc | default(-1)) == 0,
+      'rc': _wr_sidecar_results.results[_wr_idx].rc | default('skipped')}]}}"
+  loop: "{{_np_sidecar_targets | default([])}}"
+  loop_control:
+    loop_var: _sidecar_target
+    index_var: _wr_idx
+  when: _np_sidecar_targets | default([]) | length > 0
+
+# ---------------------------------------------------------------------------
+# cluster-defined reachability checks (network_policies.reachability_tests)
+# ---------------------------------------------------------------------------
+- name: probe configured reachability targets
+  ansible.builtin.command:
+    argv:
+      - /usr/local/bin/kubectl
+      - "--kubeconfig"
+      - "{{_k3s_kubecfg}}"
+      - run
+      - -n
+      - "{{(_custom_test.namespace | default('default'))}}"
+      - "{{(_custom_test.name | regex_replace('[^a-zA-Z0-9-]', '-') | regex_replace('-+', '-') | regex_replace('^-|-$', '') | truncate(40, True, ''))}}-{{_wr_custom_idx}}"
+      - --image={{_custom_test.image | default('busybox:1.36')}}
+      - --restart=Never
+      - --rm
+      - -i
+      - --labels
+      - "{{_probe_labels}}"
+      - --
+      - sh
+      - "-c"
+      - "n=0; until nc -z -w 5 {{_custom_test.host}} {{_custom_test.port}}; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
+  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop_control:
+    loop_var: _custom_test
+    index_var: _wr_custom_idx
+    label: "{{_custom_test.name}}"
+  register: _wr_custom_results
+  ignore_errors: true
+  changed_when: false
+  when: _k3s_cfg.network_policies.reachability_tests | default([]) | length > 0
+  vars:
+    # always set, so the argv shape is invariant; an entry without labels
+    # gets a benign marker label (unlabeled = plain namespace-baseline egress)
+    _probe_labels: >-
+      {%- set _lbls = [] -%}
+      {%- for _l in _custom_test.labels | default({}) | dict2items -%}
+      {%- set _ = _lbls.append(_l.key ~ '=' ~ _l.value) -%}
+      {%- endfor -%}
+      {%- if _lbls | length == 0 -%}
+      {%- set _ = _lbls.append('ansible.netpol-probe=custom') -%}
+      {%- endif -%}
+      {{_lbls | join(',')}}
+
+- name: record custom test results
+  set_fact:
+    _wr_test_results: "{{_wr_test_results | default([]) + [{
+      'name': _custom_test.name,
+      'expect': _custom_test.expect | default('reachable'),
+      'pass': (_wr_custom_results.results[_wr_custom_idx].rc | default(-1)) == 0
+              if (_custom_test.expect | default('reachable')) == 'reachable'
+              else (_wr_custom_results.results[_wr_custom_idx].rc | default(-1)) != 0,
+      'rc': _wr_custom_results.results[_wr_custom_idx].rc | default('skipped')}]}}"
+  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop_control:
+    loop_var: _custom_test
+    index_var: _wr_custom_idx
+    label: "{{_custom_test.name}}"
+  when: _k3s_cfg.network_policies.reachability_tests | default([]) | length > 0
+
+- name: assert all workload reachability tests passed
+  assert:
+    that:
+      - _wr_test_results | selectattr('pass', 'equalto', false) | list | length == 0
+    success_msg: "all workload reachability tests passed"
+    fail_msg: >-
+      Workload reachability test failures:
+      {% for r in _wr_test_results | selectattr('pass', 'equalto', false) %}
+      - {{r.name}}: expected {{r.expect}}, rc={{r.rc}}
+      {% endfor %}
+  when: _wr_test_results | default([]) | length > 0

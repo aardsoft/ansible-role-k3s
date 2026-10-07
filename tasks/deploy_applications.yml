@@ -1,0 +1,33 @@
+# Application-level deployment tasks for k3s clusters.
+# These run on the first server only and deploy user workloads, pods,
+# and network policies that depend on infrastructure already being in place.
+#
+# Included from tasks/main.yml when 'applications' is in _k3s_phases.
+
+- name: run extra deployments
+  include_tasks: "deployments.yml"
+  with_dict: "{{_k3s_cfg.deployments|default({})}}"
+  loop_control:
+    loop_var: _deployment
+
+- name: manage k3s pods
+  include_tasks: manage_pods.yml
+  when: network_pods is defined
+
+# Network policies are applied last so pod label updates from manage_pods and
+# extra deployments above are already in place when policies take effect.
+- include_tasks: deploy_network_policies.yml
+  when: >
+    _k3s_cfg.network_policies is defined and
+    _k3s_cfg.network_policies.state | default('present') == 'present'
+
+- include_tasks: test_network_policies.yml
+  when: >
+    _k3s_cfg.network_policies is defined and
+    _k3s_cfg.network_policies.state | default('present') == 'present' and
+    (_k3s_cfg.network_policies.run_tests | default(false) or k3s_run_tests | default(false))
+
+- include_tasks: remove_network_policies.yml
+  when: >
+    _k3s_cfg.network_policies is defined and
+    _k3s_cfg.network_policies.state | default('present') == 'absent'

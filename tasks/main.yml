@@ -1,7 +1,17 @@
 - include_tasks: setup_facts.yml
 
+# Phase model for k3s deployment. This allows us to split deployment into several
+# phases - and also helps with bootstrap: We can just bring the core cluster up,
+# verify, and only then add the next layer of services on top.
+# Defaults to all phases unless explicitly overridden or k3s_bootstrap_only is set.
+- set_fact:
+    _k3s_phases: "{{ ['bootstrap', 'infrastructure', 'applications'] if not (k3s_bootstrap_only | default(false)) else ['bootstrap'] }}"
+  when: _k3s_phases is undefined
+
 - include_tasks: k3s_setup.yml
-  when: _k3s_cfg is defined
+  when: >
+    _k3s_cfg is defined and
+    'bootstrap' in _k3s_phases
 
 # Write Traefik HelmChartConfig on all server nodes as soon as the traefik key
 # is defined so entrypoints and TLS are in place before other deployments run.
@@ -64,12 +74,32 @@
     k3s_role|default('agent') == 'server'
   run_once: true
 
-- include_tasks: deploy_on_first.yml
+- include_tasks: deploy_infrastructure.yml
   when: >
     _k3s_cfg is defined and
     k3s_role|default('agent') == 'server' and
     _first_server == true and
-    not (k3s_bootstrap_only | default(false))
+    'infrastructure' in _k3s_phases
+
+- include_tasks: deploy_applications.yml
+  when: >
+    _k3s_cfg is defined and
+    k3s_role|default('agent') == 'server' and
+    _first_server == true and
+    'applications' in _k3s_phases
+
+# Workload reachability probes (network_policies.reachability_tests +
+# cert-manager sidecarURL) run AFTER workload deployment: on fresh clusters
+# the probed services don't exist when the in-infrastructure policy tests
+# run.  Standalone kubectl-run probes, no test namespace needed.
+- include_tasks: test_workload_reachability.yml
+  when: >
+    _k3s_cfg is defined and
+    k3s_role|default('agent') == 'server' and
+    _first_server == true and
+    'applications' in _k3s_phases and
+    _k3s_cfg.network_policies is defined and
+    (_k3s_cfg.network_policies.run_tests | default(false)) | bool
 
 # those tasks could be anything - so they're run against all cluster members.
 # it's expected that the included tasks limit to roles or specific cluster
@@ -81,7 +111,7 @@
     loop_var: _tasks
   when: >
     _k3s_cfg.extra_tasks is defined and
-    not (k3s_bootstrap_only | default(false))
+    'applications' in _k3s_phases
 
 - name: include additional tasks (global)
   include_tasks: "tasks/{{_tasks}}.yml"
@@ -90,4 +120,4 @@
     loop_var: _tasks
   when: >
     k3s_extra_tasks is defined and
-    not (k3s_bootstrap_only | default(false))
+    'applications' in _k3s_phases
