@@ -1,1 +1,11 @@
-{{ _k3s_cfg.registries | to_nice_yaml }}
+{#jinja2: lstrip_blocks: True, trim_blocks: True#}
+{% set _registries = _k3s_cfg.registries | default({}) %}
+{% if _k3s_cfg.embedded_registry | default(false) %}
+{%   set _mirrors = _registries.mirrors | default({}) %}
+{%   if '*' not in _mirrors %}
+{%     set _registries = _registries | combine({'mirrors': _mirrors | combine({'*': {}})}, recursive=true) %}
+{%   endif %}
+{% endif %}
+{% set _yaml = _registries | to_nice_yaml %}
+{# to_nice_yaml renders bare keys as ': {}' or ': null'; k3s expects just ':' #}
+{{ _yaml | regex_replace(':\s*{}$', ':', multiline=true) | regex_replace(':\s*null$', ':', multiline=true) }}

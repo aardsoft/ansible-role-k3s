@@ -79,6 +79,55 @@
     path: /etc/rancher/k3s
   when: _k3s_cfg.use_config_file | default(false) or _k3s_cfg.registries is defined
 
+# When using the embedded registry mirror (air-gapped / island clusters),
+# ensure the image staging directory exists before k3s starts.  Operators
+# must copy image tarballs into this path before running the role.
+- name: create k3s agent images staging directory
+  ansible.builtin.file:
+    state: directory
+    mode: 0755
+    owner: root
+    path: /var/lib/rancher/k3s/agent/images
+  when: >
+    _k3s_cfg.embedded_registry | default(false) and
+    _node_uninitialized | default(false)
+
+- name: check for staged images on first server
+  ansible.builtin.find:
+    paths: /var/lib/rancher/k3s/agent/images
+    patterns:
+      - "*.tar"
+      - "*.tar.gz"
+      - "*.tar.zst"
+    file_type: file
+  register: _k3s_staged_images
+  when: >
+    _k3s_cfg.embedded_registry | default(false) and
+    _first_server | default(false)
+
+- name: fail if no images staged on first server during initial bootstrap
+  ansible.builtin.fail:
+    msg: >
+      Air-gapped / island bootstrap requires image tarballs in
+      /var/lib/rancher/k3s/agent/images/ on the first server before running
+      the role.
+
+      Detected: embedded_registry is enabled, this is the first server, and
+      no .tar / .tar.gz / .tar.zst files were found in the staging directory.
+
+      Required images include at minimum:
+        - k3s core images (coredns, traefik, metrics-server, pause, etc.)
+        - component images for state: present items in your cluster config
+        - application pod images from your site.yaml
+
+      Collect tarballs on your operator machine, copy them to the first
+      server, then re-run this playbook.
+  when: >
+    _k3s_cfg.embedded_registry | default(false) and
+    _first_server | default(false) and
+    _k3s_staged_images.files | default([]) | length == 0 and
+    (_k3s_status.status.ActiveState | default('inactive')) != 'active'
+
 - name: copy longhorn environment check
   ansible.builtin.copy:
     src: longhorn/environment_check.sh
@@ -226,6 +275,11 @@
     _k3s_args: "{{k3s_role}} {{_k3s_bind_args}} {{_k3s_cfg.args|default('')}}"
   when: not (_k3s_cfg.use_config_file | default(false))
 
+- name: add embedded-registry flag to install args
+  set_fact:
+    _k3s_args: "{{_k3s_args}} --embedded-registry"
+  when: _k3s_cfg.embedded_registry | default(false)
+
 - set_fact:
     _k3s_args: "{{_k3s_args}} --cluster-init --write-kubeconfig-mode={{_k3s_cfg.kubeconfig_mode|default('0600')}}"
   when: _first_server == true and not (_k3s_cfg.use_config_file | default(false))
@@ -273,14 +327,18 @@
     mode: "0600"
     owner: root
   register: _k3s_registries_written
-  when: _k3s_cfg.registries is defined
+  when: >
+    _k3s_cfg.registries is defined or
+    (_k3s_cfg.embedded_registry | default(false))
 
 - name: remove k3s registries.yaml
   ansible.builtin.file:
     path: /etc/rancher/k3s/registries.yaml
     state: absent
   register: _k3s_registries_removed
-  when: _k3s_cfg.registries is not defined
+  when: >
+    _k3s_cfg.registries is not defined and
+    not (_k3s_cfg.embedded_registry | default(false))
 
 - name: restart k3s
   ansible.builtin.systemd_service:

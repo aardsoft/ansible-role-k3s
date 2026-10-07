@@ -38,4 +38,7 @@ write-kubeconfig-mode: "{{ _k3s_cfg.kubeconfig_mode | default('0600') }}"
 {{ option }}
 {% endfor %}
 {% endif %}
+{% if _k3s_cfg.embedded_registry | default(false) %}
+embedded-registry: true
+{% endif %}
 {% endif %}
