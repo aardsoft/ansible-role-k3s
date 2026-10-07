@@ -1,0 +1,35 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+# {{ ansible_managed }}
+# Per-workload Longhorn StorageClasses (_k3s_cfg.longhorn.storage_classes).
+# The chart's default "longhorn" class is NOT re-rendered here — only the
+# named per-workload classes from the cluster config.  Parameters are
+# snapshot into volumes at creation time; PVC storageClassName is immutable
+# after binding, so existing volumes stay on their original class (patch the
+# longhorn Volume CR for those instead).
+# volumeBindingMode: Immediate so PVCs bind without a consumer pod in
+# scheduled state (matches the chart's default class; WaitForFirstConsumer
+# would leave new claims Pending until a pod references them).
+{% for _sc_name, _sc in (_np_longhorn_storage_classes | default({})).items() %}
+---
+apiVersion: storage.k8s.io/v1
+kind: StorageClass
+metadata:
+  name: {{ _sc_name }}
+  labels:
+    configurator: ansible
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+provisioner: driver.longhorn.io
+allowVolumeExpansion: true
+reclaimPolicy: Delete
+volumeBindingMode: Immediate
+parameters:
+  {% for _param, _value in (_sc.parameters | default({})).items() %}
+  {% if _param != 'fsType' %}
+  {{ _param }}: "{{ _value }}"
+  {% endif %}
+  {% endfor %}
+  fsType: "{{ _sc.parameters.fsType | default('ext4') }}"
+{% endfor %}

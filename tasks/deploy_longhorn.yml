@@ -4,6 +4,46 @@
     state: present
     definition: "{{lookup('file', 'longhorn/longhorn.yaml')}}"
 
+# Per-workload StorageClasses (see templates/longhorn-storageclass.yml.j2;
+# config in _k3s_cfg.longhorn.storage_classes).  The chart's default
+# "longhorn" class is not touched here.
+- name: query existing StorageClasses managed by us
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    label_selectors:
+      - "configurator=ansible"
+  register: _current_longhorn_storage_classes
+
+- name: index existing StorageClasses by name
+  set_fact:
+    _longhorn_sc_index: >-
+      {{ dict(_current_longhorn_storage_classes.resources
+              | map(attribute='metadata.name')
+              | zip(_current_longhorn_storage_classes.resources)) }}
+
+- name: deploy per-workload StorageClasses
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_desired}}"
+  loop: "{{_desired_longhorn_storage_classes}}"
+  loop_control:
+    loop_var: _desired
+    label: "{{_desired.metadata.name}}"
+  when: _k3s_cfg.longhorn.storage_classes | default({}) | length > 0 and
+        _desired | k3s_content_changed(_longhorn_sc_index[_desired.metadata.name] | default(none))
+  vars:
+    _desired_longhorn_storage_classes: "{{ lookup('template', 'longhorn-storageclass.yml.j2') | from_yaml_all | select('mapping') | list }}"
+    _np_longhorn_storage_classes: "{{_k3s_cfg.longhorn.storage_classes}}"
+
+# StorageClasses are global objects; a name change in the config would leave
+# the old class behind (no automatic cleanup — classes in use are bound PVCs'
+# immutable references, so deleting a still-referenced class would break the
+# cluster; remove manually once any claims using it are gone).
+
 - name: create longhorn-ui ingress
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
