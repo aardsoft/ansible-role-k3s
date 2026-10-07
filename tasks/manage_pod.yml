@@ -268,6 +268,41 @@
               | map(attribute='metadata.name')
               | zip(_existing_pod_pvcs.resources)) }}
 
+# A PVC spec becomes immutable after binding — of the fields the template
+# renders, storageClassName can never change on a Bound claim (only
+# resources.requests may change).  On a not-yet-bound claim the API still
+# accepts class changes (failed-provision fix path).  If an existing Bound
+# claim's class differs from the desired one, report the conflict and skip
+# instead of crash-looping. We might want to collect those and dump them
+# at the end for better visibility - it's not breaking, but PVCs silently
+# in the wrong storage class also is not ideal.
+#
+# Adjusting the storage class without data loss (as with re-creation) works
+# by patching the longhorn volume directly (kubectl -n longhorn-system patch
+# volumes <pvc-uid> --type=merge -p '{"spec": {...}}').
+- name: "warn about PVC storageClass change on bound claims ({{_pod_name}})"
+  debug:
+    msg: >-
+      PVC {{_pvc_name}} is bound to storageClass
+      '{{_current_pvc.spec.storageClassName}}' but desired class is
+      '{{_pvc.persistentVolumeClaim.storageClass | default('longhorn')}}'.
+      storageClassName is immutable after binding — delete the PVC
+      (loses data) to provision on the new class, or patch the longhorn
+      volume settings if only durability flags matter.
+  loop: "{{_pod_volumes}}"
+  loop_control:
+    loop_var: _pvc
+    label: "{{_pvc.name}}"
+  vars:
+    _pvc_name: "{{_pvc.persistentVolumeClaim.claimName}}"
+    _current_pvc: "{{ _existing_pvc_index[_pvc_name] if _pvc_name in _existing_pvc_index else none }}"
+  when: >
+    _pvc.persistentVolumeClaim is defined and
+    _current_pvc is not none and
+    (_current_pvc.status.phase | default('')) == 'Bound' and
+    (_pvc.persistentVolumeClaim.storageClass | default('longhorn')) !=
+    (_current_pvc.spec.storageClassName | default(''))
+
 - name: "create PersistentVolumeClaims for pod volumes ({{_pod_name}})"
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
@@ -283,6 +318,12 @@
     _current_pvc: "{{ _existing_pvc_index[_pvc_name] if _pvc_name in _existing_pvc_index else none }}"
   when: >
     _pvc.persistentVolumeClaim is defined and
+    (
+      _current_pvc is none or
+      (_current_pvc.status.phase | default('')) != 'Bound' or
+      (_current_pvc.spec.storageClassName | default('')) ==
+      (_pvc.persistentVolumeClaim.storageClass | default('longhorn'))
+    ) and
     (lookup('template', 'pod-pvc.yml.j2') | from_yaml | k3s_content_changed(_current_pvc))
 
 - name: "push workload template for debug ({{_pod_name}})"

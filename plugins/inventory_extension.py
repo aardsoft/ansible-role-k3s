@@ -106,6 +106,20 @@ class InventoryExtension:
 
         return parsed
 
+    @staticmethod
+    def _deep_merge_dicts(base, override):
+        ''' Recursive dict merge: override wins per leaf field; nested dicts
+        are merged recursively so e.g. persistentVolumeClaim fields merge.'''
+        merged = dict(base)
+        for key, value in (override or {}).items():
+            if (isinstance(value, dict) and
+                    isinstance(merged.get(key), dict)):
+                merged[key] = InventoryExtension._deep_merge_dicts(
+                    merged[key], value)
+            else:
+                merged[key] = value
+        return merged
+
     def _merge_pod_sections(self, base, override):
         ''' Merge two pod section dicts.  override wins over base.
 
@@ -113,9 +127,13 @@ class InventoryExtension:
         - containers: deep merge per-container; override wins per field; dict
           sub-fields (env, resources, ...) are themselves merged so adding an
           env var does not wipe the others.
-        - volumes, configmaps, secrets: list merge by name; override entry
-          replaces base entry with the same name; unique entries from both
-          sides are kept (base entries first, then override entries).
+        - volumes, configmaps, secrets: list merge by name; a named override
+          entry is DEEP-MERGED into the base entry of the same name (override
+          wins per field; base entries keep their order).  A site entry can
+          therefore tweak one field (e.g. persistentVolumeClaim.storageClass)
+          and claimName/size from the snippet survive.  To REPLACE an entry
+          wholesale, use a different name.  Unique base entries are kept
+          first, then override-only entries are appended.
         - tolerations: concatenate base then override (no dedup).
         - all other keys: override wins outright. '''
 
@@ -151,14 +169,22 @@ class InventoryExtension:
 
             elif key in ('volumes', 'configmaps', 'secrets'):
                 base_list = list(result.get(key) or [])
-                override_list = list(value or [])
-                override_names = {
-                    e['name'] for e in override_list
-                    if isinstance(e, dict) and 'name' in e}
-                kept = [e for e in base_list
-                        if not (isinstance(e, dict) and
-                                e.get('name') in override_names)]
-                result[key] = kept + override_list
+                index = {}
+                merged = []
+                for entry in base_list:
+                    if isinstance(entry, dict) and 'name' in entry:
+                        index[entry['name']] = len(merged)
+                    merged.append(entry)
+                tail = []
+                for entry in list(value or []):
+                    name = entry.get('name') if isinstance(entry, dict) else None
+                    if name is not None and name in index:
+                        pos = index[name]
+                        merged[pos] = self._deep_merge_dicts(
+                            merged[pos], entry)
+                    else:
+                        tail.append(entry)
+                result[key] = merged + tail
 
             else:
                 result[key] = value
