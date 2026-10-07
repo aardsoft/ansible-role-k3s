@@ -147,6 +147,18 @@ class FilterModule(object):
             if baseline.get(key) != d.get(key):
                 return True
 
+        # Out-of-band scale check: spec.replicas in the desired manifest must
+        # match the LIVE object, not just the last-applied baseline.  kubectl
+        # scale (or an HPA) patches only spec.replicas without updating the
+        # annotation, so the baseline comparison above misses a manual
+        # scale-down forever and the replica count is never reconciled
+        if desired.get('kind') in ('Deployment', 'StatefulSet', 'ReplicaSet'):
+            _d_replicas = (d.get('spec') or {}).get('replicas')
+            _c_replicas = (current.get('spec') or {}).get('replicas')
+            if _d_replicas is not None and _c_replicas is not None \
+                    and _d_replicas != _c_replicas:
+                return True
+
         return False
 
     def k3s_resource_index(self, resources):
