@@ -60,11 +60,17 @@ spec:
 {% for ic in _pod_init_containers %}
       - name: {{ic.name}}
         image: {{ic.image}}
+{% if ic.imagePullPolicy is defined %}
+        imagePullPolicy: {{ic.imagePullPolicy}}
+{% endif %}
 {% if ic.command is defined %}
         command:
 {% for cmd in ic.command %}
         - {{cmd | to_yaml(width=99999) | trim}}
 {% endfor %}
+{% endif %}
+{% if ic.workingDir is defined %}
+        workingDir: {{ic.workingDir}}
 {% endif %}
 {% if ic.args is defined %}
         args:
@@ -132,6 +138,9 @@ spec:
 {% for container_name, container in _pod_containers.items() %}
       - name: {{container_name}}
         image: {{container.image}}
+{% if container.imagePullPolicy is defined %}
+        imagePullPolicy: {{container.imagePullPolicy}}
+{% endif %}
 {% if container.command is defined %}
         command:
 {% for cmd in container.command %}
@@ -148,6 +157,9 @@ spec:
         - {{arg | to_yaml(width=99999) | trim}}
 {% endfor %}
 {% endif %}
+{% endif %}
+{% if container.workingDir is defined %}
+        workingDir: {{container.workingDir}}
 {% endif %}
 {% if container.ports is defined %}
         ports:
