@@ -17,6 +17,8 @@
     _pod_secrets: "{{(_pod.value.pod|default({})).secrets|default([])}}"
     _pod_init_containers: "{{(_pod.value.pod|default({})).initContainers|default([])}}"
     _pod_manifest: "{{(_pod.value.pod|default({})).manifest|default(false)}}"
+    _pod_termination_grace_period_seconds: "{{(_pod.value.pod|default({})).terminationGracePeriodSeconds|default(30)}}"
+    _pod_security_context: "{{(_pod.value.pod|default({})).securityContext|default({})}}"
     _pod_selector: "{{(_pod.value.k3s|default({})).selector|default({'app': _pod.key})}}"
     _pod_extra_templates: "{{(_pod.value.pod|default({})).extra_manifest_templates|default([])}}"
 
@@ -490,6 +492,23 @@
     - not _pod_manifest
     - _pod_containers | length > 0
     - (_ak_cm_results.changed | default(false)) or (_data_cm_results.changed | default(false)) or (_file_cm_results.changed | default(false)) or (_template_cm_results.changed | default(false)) or (_passdb_cm_results.changed | default(false)) or (_dir_cm_results.changed | default(false))
+
+# Snippet roles may also need to act AFTER the workload is deployed (e.g.
+# db-mariadb applying new/changed databases and users to a running container
+# without a restart, since a changed bootstrap Secret does not trigger the
+# restartedAt rollout above).  Include each snippet role's post_deploy.yml
+# if it exists, silently skipping roles that don't.
+- name: "include snippet role post-deploy tasks ({{_pod_name}})"
+  include_role:
+    name: "{{_snippet_role}}"
+    tasks_from: post_deploy
+  loop: "{{(_pod.value.k3s|default({})).snippets|default([])}}"
+  loop_control:
+    loop_var: _snippet_role
+  when: >
+    _snippet_role_paths is defined and
+    _snippet_role_paths[_snippet_role] is defined and
+    (_snippet_role_paths[_snippet_role] ~ '/tasks/post_deploy.yml') is file
 
 # Clean up PVCs for volumes that were removed from config. This runs after the
 # Deployment update so the rolling update has already removed the volumeMount

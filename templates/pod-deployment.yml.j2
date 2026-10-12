@@ -36,6 +36,36 @@ spec:
 {% endfor %}
 {% endif %}
     spec:
+{% if _pod_termination_grace_period_seconds | default(30) | int != 30 %}
+      # pod-wide SIGTERM grace (see container commands for who needs it;
+      # kubelet SIGKILLs all containers after this)
+      terminationGracePeriodSeconds: {{_pod_termination_grace_period_seconds | int}}
+{% endif %}
+{% if _pod_security_context | default({}) | length > 0 %}
+      # pod-wide securityContext: every container inherits it (fsGroup makes
+      # the kubelet chown a fresh PVC mount so a non-root container can use
+      # it without an init chown)
+      securityContext:
+{% if _pod_security_context.runAsUser is defined %}
+        runAsUser: {{_pod_security_context.runAsUser}}
+{% endif %}
+{% if _pod_security_context.runAsGroup is defined %}
+        runAsGroup: {{_pod_security_context.runAsGroup}}
+{% endif %}
+{% if _pod_security_context.fsGroup is defined %}
+        fsGroup: {{_pod_security_context.fsGroup}}
+{% endif %}
+{% if _pod_security_context.runAsNonRoot is defined %}
+        runAsNonRoot: {{_pod_security_context.runAsNonRoot | lower}}
+{% endif %}
+{% if _pod_security_context.fsGroupChangePolicy is defined %}
+        fsGroupChangePolicy: {{_pod_security_context.fsGroupChangePolicy}}
+{% endif %}
+{% if _pod_security_context.seccompProfile is defined %}
+        seccompProfile:
+          type: {{_pod_security_context.seccompProfile.type}}
+{% endif %}
+{% endif %}
 {% if _pod_tolerations | length > 0 %}
       tolerations:
 {% for toleration in _pod_tolerations %}
