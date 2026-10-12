@@ -5,15 +5,23 @@
 # reboots, and uncordons nodes one at a time.
 #
 # Configuration under _k3s_cfg.kured:
-#   state:         present | absent
-#   namespace:     Kubernetes namespace       (default: kube-system)
-#   version:       kubereboot/kured chart version (default: latest)
-#   drain_timeout: Node drain timeout         (default: 0 = unlimited)
-#   period:        Sentinel check interval    (default: 1h)
-#   reboot_days:   List of days allowed       (default: all days)
-#                  e.g. [mon, tue, wed, thu, fri]
-#   start_time:    Maintenance window start   (24h format, e.g. "2:00")
-#   end_time:      Maintenance window end     (24h format, e.g. "5:00")
+#   state:              present | absent
+#   namespace:          Kubernetes namespace      (default: kube-system)
+#   version:            kubereboot/kured chart version — PIN THIS
+#                       (default: latest chart, which is exactly how the
+#                       2026-10-02 drift happened)
+#   drain_timeout:      Node drain timeout        (default: 15m, aborts the
+#                       drain + retries next cycle; set 0 for unlimited)
+#   drain_grace_period: Per-pod drain SIGTERM grace (default: pod spec
+#                       terminationGracePeriodSeconds)
+#   lock_ttl:           Reboot-lock expiry        (default: 30m)
+#   concurrency:        Simultaneous reboots      (default: 1, never raise
+#                       it on Longhorn clusters)
+#   period:             Sentinel check interval   (default: 1h)
+#   reboot_days:        List of days allowed      (default: all days)
+#                       e.g. [mon, tue, wed, thu, fri]
+#   start_time:         Maintenance window start  (24h format, e.g. "2:00")
+#   end_time:           Maintenance window end    (24h format, e.g. "5:00")
 #
 # Check kured deployment with:
 #

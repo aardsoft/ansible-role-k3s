@@ -10,6 +10,34 @@ configuration:
   rebootSentinel: /run/reboot-needed
 {% if _k3s_cfg.kured.drain_timeout is defined %}
   drainTimeout: {{ _k3s_cfg.kured.drain_timeout }}
+{% else %}
+  # Abort the drain after 15m instead of hanging forever (app default is
+  # drain-timeout 0 = unlimited). forceReboot is not set, so a failed or
+  # timed-out drain aborts the reboot and the node retries on the next
+  # sentinel cycle.
+  drainTimeout: 15m
+{% endif %}
+{% if _k3s_cfg.kured.drain_grace_period is defined %}
+  # per-pod SIGTERM grace override for draining (app default -1 = use the
+  # pod spec value, which is what stateful pods set via
+  # terminationGracePeriodSeconds)
+  drainGracePeriod: {{ _k3s_cfg.kured.drain_grace_period }}
+{% endif %}
+{% if _k3s_cfg.kured.lock_ttl is defined %}
+  lockTtl: {{ _k3s_cfg.kured.lock_ttl }}
+{% else %}
+  # Expire the reboot-lock annotation after 30m so a kured crash mid-reboot
+  # cannot leave the cluster unable to reboot any node ever again (app
+  # default lock-ttl 0 = never expires).
+  lockTtl: 30m
+{% endif %}
+{% if _k3s_cfg.kured.concurrency is defined %}
+  concurrency: {{ _k3s_cfg.kured.concurrency }}
+{% else %}
+  # Exactly one node reboot at a time (matches the app default; pinned here
+  # so a chart default change cannot silently break it). Longhorn volumes
+  # must never lose all replicas at once
+  concurrency: 1
 {% endif %}
 {% if _k3s_cfg.kured.period is defined %}
   period: {{ _k3s_cfg.kured.period }}
@@ -22,4 +50,12 @@ configuration:
 {% endif %}
 {% if _k3s_cfg.kured.end_time is defined %}
   endTime: "{{ _k3s_cfg.kured.end_time }}"
+{% endif %}
+{% if _k3s_cfg.kured.timezone is defined %}
+  # Timezone for the reboot window: kured parses startTime/endTime against
+  # the container's local clock, which is UTC by default — "2:00-5:00" in UTC
+  # is 05:00-08:00 in EEST/EET. Chart renders configuration.timeZone as the
+  # native --time-zone flag; the TZ env var would be a no-op here (only
+  # top-level extraEnvVars reaches the pod, not configuration.*).
+  timeZone: "{{ _k3s_cfg.kured.timezone }}"
 {% endif %}
