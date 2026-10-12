@@ -1,0 +1,226 @@
+# Longhorn storage disk provisioning from host-level inventory.
+#
+# Included from tasks/main.yml for every real k3s node whose host_vars
+# define `longhorn_volumes` (schema in provision_longhorn_disk.yml).  The
+# default disks (root volume, shared with the OS) are NOT touched by any of
+# this — they stay registered by Longhorn's own auto-detection.
+#
+# Flow per node, each serial play turn:
+#   1. lsblk inventory of the whole block device tree
+#   2. per-entry: match exactly one disk, guard it (empty, or a disk this
+#      role provisioned before), partition + mkfs + systemd mount unit
+#   3. reconcile stale mount units from entries that no longer exist
+#      (stop + disable + delete the unit — data is never touched)
+#   4. register the disks on the node's Longhorn CR (disk key longhorn-<name>,
+#      path, tier tags) and de-register stale longhorn-* keys.  The k8s API
+#      access happens on the first server via delegate_to — the resolved
+#      target comes from the facts gathered in the first play of
+#      playbooks/k3s.yml, so -l runs restricted to a subset of nodes will
+#      skip (and warn about) the registration unless the first server's
+#      facts are in the run.
+#
+# Cluster-wide side effects live elsewhere: tier -> StorageClass mapping in
+# deploy_longhorn.yml / longhorn-storageclass.yml.j2 (classes longhorn-<tier>
+# with a diskSelector parameter derived from tiers actually referenced across
+# the cluster's host configs).
+#
+# First-run caveat: on a fresh cluster the very first run may reach the
+# registration step before the Longhorn CRDs exist (the chart deploys in the
+# infrastructure phase); the registration then logs a loud warning about the
+# skipped patch and the next full run picks it up.  Provisioning itself is
+# always complete.
+#
+# Longhorn uninstall (remove_longhorn.yml) does not touch provisioned disks:
+# they stay mounted, partitioned and registered on the node CRs until the
+# longhorn_volumes entries are removed from the host config (which unmounts
+# and de-registers them but still never wipes data).
+
+- name: query block devices
+  ansible.builtin.command:
+    cmd: lsblk -J -b -o NAME,PATH,SIZE,TYPE,FSTYPE,ROTA,TRAN,MOUNTPOINT,MODEL,PARTLABEL
+  register: _longhorn_lsblk_raw
+  changed_when: false
+
+- name: parse block device inventory
+  ansible.builtin.set_fact:
+    _longhorn_lsblk: "{{ _longhorn_lsblk_raw.stdout | from_json }}"
+
+- name: install filesystem tools for provisioned volumes
+  include_role:
+    name: data-utilities
+    tasks_from: install_packages
+  vars:
+    packages: >-
+      {{ longhorn_volumes
+         | map(attribute='fs', default='ext4')
+         | map('regex_replace', '^(ext4)$', 'e2fsprogs')
+         | map('regex_replace', '^(xfs)$', 'xfsprogs')
+         | select('in', ['e2fsprogs', 'xfsprogs'])
+         | list | unique }}
+
+- name: provision longhorn disks
+  include_tasks: provision_longhorn_disk.yml
+  loop: "{{longhorn_volumes}}"
+  loop_control:
+    loop_var: _lv
+    label: "{{_lv.name}}"
+
+# --- reconcile leftover mount units ---------------------------------------
+# A entry that was removed (or whose tier/name changed) leaves its mount
+# unit behind.  Recover the mountpoint from the unit name (systemd-escape
+# --unescape of the unit name minus the .mount suffix yields the exact
+# original path) and disable anything the current config no longer covers.
+
+- name: list existing longhorn mount units
+  ansible.builtin.command: "systemctl list-unit-files 'var\\x2dlib-longhorn*' --type=mount --no-legend"
+  register: _longhorn_units_raw
+  changed_when: false
+  # rc 1 (no matches) is not an error
+  failed_when: false
+
+- name: parse longhorn mount unit names
+  ansible.builtin.set_fact:
+    _longhorn_units: >-
+      {{ _longhorn_units_raw.stdout_lines
+         | select('string')
+         | map('regex_replace', '\\s.*$', '')
+         | map('regex_replace', '\\.mount$', '')
+         | list }}
+
+- name: uncover stale longhorn mount units
+  include_tasks: provision_longhorn_stale_unit.yml
+  loop: "{{_longhorn_units | default([])}}"
+  loop_control:
+    loop_var: _longhorn_unit
+    label: "{{_longhorn_unit}}"
+
+# --- node CR registration --------------------------------------------------
+
+- name: resolve first server host
+  ansible.builtin.set_fact:
+    _longhorn_first_server_host: >-
+      {{ (groups[k3s_clusters[k3s_cluster]] | default([])
+          | map('extract', hostvars)
+          | selectattr('ansible_all_ipv4_addresses', 'defined')
+          | selectattr('ansible_all_ipv4_addresses', 'contains', _k3s_cfg.first_server)
+          | map(attribute='inventory_hostname')
+          | list) | first | default('') }}
+
+# changed_when: true on debug warnings is a recap filter, deliberate: a
+# warning that only appears in stdout text is invisible in `PLAY RECAP`, so
+# every warn task also reports as changed.
+
+- name: warn when node CR registration is not possible
+  ansible.builtin.debug:
+    msg: >-
+      Longhorn node CR registration for {{ inventory_hostname }} skipped:
+      {{ 'no first-server node with gathered facts found in this run —
+      run without -l so the k8s API write can be delegated' if not
+      _longhorn_first_server_host }}.
+  when: not _longhorn_first_server_host
+  changed_when: true
+
+- name: check longhorn node CR availability
+  # namespace required: nodes.longhorn.io are NAMESPACED CRs
+  # (longhorn-system); without it the query reads the default namespace
+  # and silently returns zero resources (found 2026-10-11 right after the
+  # `| bool on hostname` fix un-masked this).
+  # failed_when: false alone (no ignore_errors): the register stays
+  # well-formed and the gate below reads resources only — a query error is
+  # handled as "CR missing" with its own warning path.
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: longhorn.io/v1beta2
+    kind: Node
+    namespace: longhorn-system
+    name: "{{inventory_hostname}}"
+  register: _longhorn_nodecr
+  delegate_to: "{{_longhorn_first_server_host}}"
+  failed_when: false
+  when: _longhorn_first_server_host
+
+- name: decide node CR registration
+  ansible.builtin.set_fact:
+    # | bool is WRONG on _longhorn_first_server_host: it holds a hostname
+    # ('fi1m01'), and the bool filter only accepts yes/no/true/false/1/0/on/off
+    # — a hostname silently evaluates as False, which skipped the whole
+    # registration chain on every node (found 2026-10-11: disks provisioned,
+    # node CRs never patched).  Truthiness here is a length check instead.
+    _longhorn_register: >-
+      {{ (_longhorn_first_server_host | default('', true) | length > 0)
+         and _longhorn_nodecr.resources | default([]) | length == 1 }}
+
+- name: warn when longhorn node CR is missing
+  ansible.builtin.debug:
+    msg: >-
+      Longhorn node CR for {{ inventory_hostname }} could not be read
+      (first run before the Longhorn CRDs/charts exist?) — skipping the
+      disk registration ({{ longhorn_node_disks | default({}) | dict2items | map(attribute='key') | join(', ') }}).
+      Re-run the playbook once the infrastructure phase succeeded; the
+      disks are already provisioned and mounted.
+  when: >-
+    (_longhorn_first_server_host | default('', true) | length > 0) and
+    not (_longhorn_register | bool)
+  changed_when: true
+
+- name: build node CR disk patch
+  # {%-/-%} trim markers: the rendered output must be exactly one expression
+  # for the fact to stay a dict (the k8s module rejects a string here).
+  # allowScheduling is deliberately NOT part of the change trigger and is
+  # omitted from changed EXISTING entries: Longhorn sets it false on disks it
+  # marks failed/space-exhausted and operators can disable a disk in the UI —
+  # re-enabling on every run would fight that.  JSON merge patch keeps
+  # unspecified keys, so path/tags-only patches leave it as-is.  New entries
+  # carry allowScheduling: true at creation (from the record task).
+  ansible.builtin.set_fact:
+    _longhorn_node_disk_patch: >-
+      {%- set _cur = _longhorn_nodecr.resources[0].spec.disks | default({}) -%}
+      {%- set _d = dict() -%}
+      {%- for _lk, _ld in (longhorn_node_disks | default({})).items() -%}
+      {%- set _cd = _cur[_lk] | default({}, true) -%}
+      {%- if _cd | length == 0 -%}
+      {%- set _ = _d.update({_lk: _ld}) -%}
+      {%- elif _cd.path | default('', true) != _ld.path
+            or (_cd.tags | default([]) | sort) != (_ld.tags | sort) -%}
+      {%- set _ = _d.update({_lk: {'path': _ld.path, 'tags': _ld.tags}}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {%- for _curkey in _cur.keys() | select('match', '^longhorn-') | list -%}
+      {%- if _curkey not in (longhorn_node_disks | default({})) -%}
+      {%- set _ = _d.update({_curkey: none}) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ _d }}
+  when: _longhorn_register | bool
+
+- name: register longhorn disks on node CR
+  # merge semantics: longhorn.io/v1beta2 rejects strategic-merge-patch
+  # ("unknown format"; only json/merge/apply are accepted) — the strategic
+  # default made this task fatal and aborted the whole serial play.
+  # merge_type: merge (RFC 7386 JSON Merge-Patch) works on BOTH old and new
+  # kubernetes.core collections — patch_type: merge (same semantics,
+  # collection >= 2.4) does not exist on the older Mac ansible collection
+  # and fatal'd with "Unsupported parameters" (2026-10-11), and the old
+  # collection spells merge_type json-merge nowhere (choices: json, merge,
+  # strategic-merge).  Nested dicts merge per-key, null deletes a stale
+  # disk key.
+  # api_version is MANDATORY here: without it the module's resource
+  # discovery can resolve kind: Node to the CORE cluster-scoped node, and
+  # the merge patch then drops the unknown spec.disks field with only a
+  # server-side validation warning — task green, CR never written
+  # (found 2026-10-11: turn ran end to end, disks still absent).
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    merge_type: merge
+    api_version: longhorn.io/v1beta2
+    kind: Node
+    namespace: longhorn-system
+    name: "{{inventory_hostname}}"
+    definition:
+      spec:
+        disks: "{{_longhorn_node_disk_patch}}"
+  delegate_to: "{{_longhorn_first_server_host}}"
+  when: >-
+    _longhorn_register | bool and
+    (_longhorn_node_disk_patch | length > 0)

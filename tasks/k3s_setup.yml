@@ -144,13 +144,6 @@
     _k3s_staged_images.files | default([]) | length == 0 and
     (_k3s_status.status.ActiveState | default('inactive')) != 'active'
 
-- name: copy longhorn environment check
-  ansible.builtin.copy:
-    src: longhorn/environment_check.sh
-    dest: "{{local_bin|default('/usr/local/bin')}}/longhorn_environment_check"
-    mode: 0755
-    owner: root
-
 - name: parse bind CIDRs
   set_fact:
     _bind_cidrs: "{{ _k3s_cfg.bind_cidr.split(',') | map('trim') | list }}"

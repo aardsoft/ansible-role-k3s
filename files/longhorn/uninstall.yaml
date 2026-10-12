@@ -74,6 +74,7 @@ rules:
   - backups
   - backuptargets
   - backupvolumes
+  - enginefrontends
   - engineimages
   - engines
   - instancemanagers
@@ -82,6 +83,8 @@ rules:
   - recurringjobs
   - replicas
   - settings
+  - shardgroups
+  - shards
   - sharemanagers
   - snapshots
   - supportbundles
@@ -139,7 +142,7 @@ spec:
         env:
         - name: LONGHORN_NAMESPACE
           value: longhorn-system
-        image: longhornio/longhorn-manager:v1.10.2
+        image: longhornio/longhorn-manager:v1.12.1
         imagePullPolicy: IfNotPresent
         name: longhorn-uninstall
       restartPolicy: Never

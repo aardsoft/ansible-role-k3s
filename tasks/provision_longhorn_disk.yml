@@ -1,0 +1,241 @@
+# Provisioned per longhorn_volumes entry from the caller (_lv loop var).
+# Caller context: provision_longhorn_disks.yml (sets _longhorn_lsblk,
+# accumulates longhorn_node_disks).
+#
+# longhorn_volumes entry schema (host_vars):
+#   longhorn_volumes:
+#     - name: hdd01          # unique per node; Longhorn disk key longhorn-<name>
+#       tier: hdd            # required; Longhorn disk tag and derived
+#                            # StorageClass longhorn-<tier>
+#       fs: ext4             # optional; ext4 (default) or xfs
+#       options: defaults    # optional; extra mount unit options
+#       wipe: false          # optional; allow wiping a signature on an
+#                            # unpartitioned disk, downgrading refusal to wipefs
+#       match:               # all fields must match exactly one disk
+#         device: '^sda$'    # required: regex against the lsblk device name
+#         transport: sata    # optional: lsblk tran (sata/nvme/virtio/...)
+#         rotational: true   # optional: lsblk rota (bool)
+#         model: 'WD101KFBX' # optional: regex against lsblk model
+#         size_min: 9T       # optional: minimum disk size (human readable)
+#         size_max: 10T      # optional: maximum disk size
+#
+# Safety model:
+# - only matches whole disks (type "disk"), never partitions or md/dm devices;
+# - a disk with any partition is only accepted when it is exactly the one
+#   partition this role created before (single GPT partition labelled
+#   longhorn-<name>) — root/OS disks therefore never match;
+# - a filesystem signature on an unpartitioned disk is refused unless
+#   wipe: true (which runs wipefs, not a destructive overwrite);
+# - unmatched spare disks are never consumed and entries that match nothing
+#   fail the host loudly, so stale match patterns surface on the next run.
+#
+# Note on tier: the tier is required because the mountpoint
+# (/var/lib/longhorn-<tier>/<name>) must not collide with Longhorn's default
+# storage directory /var/lib/longhorn.
+#
+# Removing an entry from longhorn_volumes de-registers the disk from the node
+# CR, disables the stale mount unit and unmounts it, but never wipes data;
+# renaming an entry requires manual intervention (the old partition label
+# still exists and refuses the new definition loudly).
+
+- name: "longhorn disk {{ _lv.name }}: require tier"
+  ansible.builtin.assert:
+    that: _lv.tier is defined
+    fail_msg: "longhorn_volumes[{{ _lv.name }}]: tier is required (it names the Longhorn disk tag and the derived StorageClass, and keeps the mountpoint out of /var/lib/longhorn)."
+
+- name: "longhorn disk {{ _lv.name }}: require a safe name and tier"
+  # | string casts first: the match test would die with a raw TypeError on a
+  # non-string (YAML int name: 123) instead of rendering this message.
+  ansible.builtin.assert:
+    that:
+      - (_lv.name | string) is match('^[a-z0-9-]+$')
+      - (_lv.tier | string) is match('^[a-z0-9-]+$')
+    fail_msg: >-
+      longhorn_volumes['{{ _lv.name }}'] / tier '{{ _lv.tier | default('') }}':
+      name and tier must be lowercase alphanumerics plus dash — they land in
+      partlabels, filesystem labels, systemd unit names and mountpoints.
+
+- name: "longhorn disk {{ _lv.name }}: match block devices"
+  # {%-/-%} trim markers keep the rendered output to exactly one expression,
+  # so this fact stays a native list (stray spaces from block tags would
+  # leave it as a string and break the | length / [0] usage below).
+  ansible.builtin.set_fact:
+    _lh_match_candidates: >-
+      {%- set _d = _longhorn_lsblk.blockdevices
+                  | selectattr('type', 'equalto', 'disk')
+                  | selectattr('name', 'search', _lv.match.device) -%}
+      {%- if _lv.match.transport is defined -%}
+      {%- set _d = _d | selectattr('tran', 'defined') | selectattr('tran', 'equalto', _lv.match.transport) -%}
+      {%- endif -%}
+      {%- if _lv.match.rotational is defined -%}
+      {%- set _d = _d | selectattr('rota', 'defined') | selectattr('rota', 'sameas', _lv.match.rotational | bool) -%}
+      {%- endif -%}
+      {%- if _lv.match.model is defined -%}
+      {%- set _d = _d | selectattr('model', 'defined') | selectattr('model', 'string') | selectattr('model', 'search', _lv.match.model) -%}
+      {%- endif -%}
+      {%- if _lv.match.size_min is defined -%}
+      {%- set _d = _d | selectattr('size', 'defined') | selectattr('size', 'ge', _lv.match.size_min | human_to_bytes) -%}
+      {%- endif -%}
+      {%- if _lv.match.size_max is defined -%}
+      {%- set _d = _d | selectattr('size', 'defined') | selectattr('size', 'le', _lv.match.size_max | human_to_bytes) -%}
+      {%- endif -%}
+      {{ _d | list }}
+
+- name: "longhorn disk {{ _lv.name }}: require unique match"
+  ansible.builtin.assert:
+    that: _lh_match_candidates | length == 1
+    fail_msg: >-
+      longhorn_volumes[{{ _lv.name }}]: the match pattern must select exactly
+      one whole disk — got candidates
+      [{{ _lh_match_candidates | map(attribute='name') | join(', ') }}].
+      Unmatched spare disks are never consumed (opt-in via longhorn_volumes);
+      if no candidate shows up here, re-check the pattern against
+      `lsblk -J -b -o NAME,SIZE,TYPE,ROTA,TRAN,MODEL` on this node.
+
+- name: "longhorn disk {{ _lv.name }}: remember device details"
+  ansible.builtin.set_fact:
+    _lh_disk: "{{ _lh_match_candidates[0] }}"
+    _lh_disk_fs: "{{ _lv.fs | default('ext4') }}"
+    _lh_disk_partlabel: "longhorn-{{ _lv.name }}"
+    _lh_disk_mountpoint: "/var/lib/longhorn-{{ _lv.tier }}/{{ _lv.name }}"
+
+- name: "longhorn disk {{ _lv.name }}: extract partition state"
+  ansible.builtin.set_fact:
+    _lh_disk_parts: >-
+      {{ (_lh_disk.children | default([]))
+         | selectattr('type', 'equalto', 'part') | list }}
+
+- name: "longhorn disk {{ _lv.name }}: collect existing mountpoints"
+  # one fact feeding both the mounted-disk assert and its fail_msg — a
+  # duplicated inline pipeline would drift apart on the first edit
+  ansible.builtin.set_fact:
+    _lh_disk_mounts: >-
+      {{ ([_lh_disk.mountpoint | default('', true)]
+          + (_lh_disk_parts
+             | selectattr('mountpoint', 'defined')
+             | map(attribute='mountpoint')))
+         | select('string')
+         | reject('equalto', '')
+         | list }}
+
+- name: "longhorn disk {{ _lv.name }}: refuse foreign partitions"
+  ansible.builtin.assert:
+    that: >-
+      _lh_disk_parts | length == 0
+      or (_lh_disk_parts | length == 1
+          and _lh_disk_parts[0].partlabel | default('', true) == _lh_disk_partlabel)
+    fail_msg: >-
+      longhorn_volumes[{{ _lv.name }}]: /dev/{{ _lh_disk.name }} carries
+      partition(s) [{{ _lh_disk_parts | map(attribute='partlabel', default='<unnamed>')
+      | join(', ') }}] that do not belong to this entry.  A disk is only
+      reused when it holds exactly the single GPT partition this role
+      provisioned (partlabel longhorn-{{ _lv.name }}); anything else — root,
+      OS, customer data, a previous Longhorn disk under a renamed entry — is
+      refused loudly.  Clean the disk by hand if you really want it.
+
+- name: "longhorn disk {{ _lv.name }}: refuse foreign filesystem"
+  ansible.builtin.assert:
+    that: >-
+      _lh_disk.fstype | default('', true) == ''
+      or (_lh_disk_parts | length == 1
+          and _lh_disk_parts[0].partlabel | default('', true) == _lh_disk_partlabel
+          and (_lh_disk_parts[0].fstype | default('', true) in ('', _lh_disk_fs)))
+      or _lv.wipe | default(false) | bool
+    fail_msg: >-
+      longhorn_volumes[{{ _lv.name }}]: /dev/{{ _lh_disk.name }} carries a
+      filesystem signature ({{ _lh_disk.fstype }}) this entry would not keep
+      as-is.  A partitioned disk is only reused as our own partition carrying
+      a matching {{ _lh_disk_fs }} filesystem; an unpartitioned disk with any
+      signature needs explicit wipe: true.  Reformatting an
+      already-registered Longhorn disk is never done here — Longhorn volume
+      data lives inside the disk it registered; set fs accordingly or wipe
+      by hand.
+
+- name: "longhorn disk {{ _lv.name }}: refuse mounted disk"
+  # An idempotent re-run sees the disk mounted at its own configured
+  # mountpoint (the systemd mount unit this role deployed earlier) — that is
+  # the only mount allowed.  Any other mountpoint means someone else owns
+  # the disk and it is refused loudly.
+  ansible.builtin.assert:
+    that: _lh_disk_mounts | reject('equalto', _lh_disk_mountpoint) | list | length == 0
+    fail_msg: >-
+      longhorn_volumes[{{ _lv.name }}]: /dev/{{ _lh_disk.name }} is already
+      mounted somewhere ({{ _lh_disk_mounts | join(', ') }}); the only
+      acceptable mount is the configured {{ _lh_disk_mountpoint }}.
+      Refusing to touch it.
+
+- name: "longhorn disk {{ _lv.name }}: wipe existing signature"
+  ansible.builtin.command: "wipefs -a /dev/{{ _lh_disk.name }}"
+  when: >-
+    _lh_disk_parts | length == 0
+    and (_lh_disk.fstype | default('', true)) | length > 0
+  changed_when: true
+
+- name: "longhorn disk {{ _lv.name }}: mark partition for creation"
+  ansible.builtin.set_fact:
+    _lh_disk_existing: "{{ _lh_disk_parts | length > 0 }}"
+
+- name: "longhorn disk {{ _lv.name }}: create partition table and partition"
+  # DOS-shorthand type=8300 is invalid on GPT (kernel BLKPG add rejects with
+  # EINVAL, sfdisk then aborts without committing the table); the GPT
+  # "Linux filesystem" GUID is what needs to be used.
+  ansible.builtin.shell:
+    cmd: |
+      printf 'label: gpt\ntype=0FC63DAF-8483-4772-8E79-3D69D8477DE4, name="%s"\n' '{{ _lh_disk_partlabel }}' | sfdisk /dev/{{ _lh_disk.name }}
+  when: not (_lh_disk_existing | bool)
+  changed_when: true
+
+- name: "longhorn disk {{ _lv.name }}: wait for partition device"
+  ansible.builtin.wait_for:
+    path: "/dev/disk/by-partlabel/{{ _lh_disk_partlabel }}"
+    timeout: 30
+
+- name: "longhorn disk {{ _lv.name }}: mark filesystem for creation"
+  ansible.builtin.set_fact:
+    _lh_disk_need_mkfs: >-
+      {{ (not _lh_disk_existing)
+         or (_lh_disk_parts | length == 1
+             and (_lh_disk_parts[0].fstype | default('', true)) == '') }}
+    _lh_disk_mkfs_label: >-
+      {{ '' if _lv.name | length > ((_lh_disk_fs == 'ext4') | ternary(16, 12))
+         else _lv.name }}
+
+- name: "longhorn disk {{ _lv.name }}: create filesystem"
+  ansible.builtin.command:
+    cmd: >-
+      mkfs.{{ _lh_disk_fs }} {{ '-F' if _lh_disk_fs == 'ext4' else '-f' }}
+      {% if _lh_disk_mkfs_label %}-L {{ _lh_disk_mkfs_label }}{% endif %}
+      /dev/disk/by-partlabel/{{ _lh_disk_partlabel }}
+  when: _lh_disk_need_mkfs | bool
+  changed_when: true
+
+- name: "longhorn disk {{ _lv.name }}: resolve mount unit name"
+  ansible.builtin.command: "systemd-escape --path '{{ _lh_disk_mountpoint }}'"
+  register: _lh_unit_name
+  changed_when: false
+
+- name: "longhorn disk {{ _lv.name }}: deploy mount unit"
+  ansible.builtin.template:
+    src: longhorn-disk-mount.j2
+    dest: "/etc/systemd/system/{{ _lh_unit_name.stdout }}.mount"
+  register: _lh_unit_file
+
+- name: "longhorn disk {{ _lv.name }}: enable and start mount"
+  ansible.builtin.systemd:
+    name: "{{ _lh_unit_name.stdout }}.mount"
+    daemon_reload: "{{ _lh_unit_file.changed }}"
+    enabled: true
+    state: started
+
+# Record the disk for the Node CR patch done by the caller
+# (provision_longhorn_disks.yml).  The register step runs from the first
+# server (see that file) — agents have no server kubeconfig, servers patch
+# via it anyway so every write lives on the same node and access path.
+- name: "longhorn disk {{ _lv.name }}: record for node CR"
+  ansible.builtin.set_fact:
+    longhorn_node_disks: >-
+      {{ longhorn_node_disks | default({})
+         | combine({'longhorn-' ~ _lv.name: {
+              'path': _lh_disk_mountpoint,
+              'allowScheduling': true,
+              'tags': [_lv.tier]}}) }}

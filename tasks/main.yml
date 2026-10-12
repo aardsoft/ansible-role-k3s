@@ -81,6 +81,20 @@
     _first_server == true and
     'infrastructure' in _k3s_phases
 
+# Longhorn disk provisioning (host_vars longhorn_volumes): per-node, on the
+# node's own serial turn so the Node CR patch (delegated to the first
+# server) always references disks that are already provisioned and mounted.
+# The tier -> StorageClass mapping is applied cluster-wide in
+# deploy_longhorn.yml.
+- include_tasks: provision_longhorn_disks.yml
+  when: >
+    longhorn_volumes is defined and
+    _k3s_cfg is defined and
+    _k3s_cfg.longhorn is defined and
+    _k3s_cfg.longhorn.state is defined and
+    _k3s_cfg.longhorn.state == 'present' and
+    'k3s_pods' not in group_names
+
 - include_tasks: deploy_applications.yml
   when: >
     _k3s_cfg is defined and

@@ -1,0 +1,17 @@
+#jinja2: lstrip_blocks: True, trim_blocks: True
+# {{ ansible_managed }}
+# Mount unit for a Longhorn storage disk provisioned by the k3s role
+# (provision_longhorn_disk.yml).  Device is pinned via the GPT partition
+# label instead of the raw device name so re-numbered disks (sda->sdc) keep
+# mounting the same filesystem.
+[Unit]
+Description=Longhorn disk {{ _lv.name }} (tier {{ _lv.tier }})
+
+[Mount]
+What=/dev/disk/by-partlabel/{{ _lh_disk_partlabel }}
+Where={{ _lh_disk_mountpoint }}
+Type={{ _lh_disk_fs }}
+Options={{ _lv.options | default('defaults') }}
+
+[Install]
+WantedBy=multi-user.target

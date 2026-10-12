@@ -1,0 +1,76 @@
+# Disables a longhorn mount unit that the current longhorn_volumes config
+# no longer covers (_longhorn_unit).  Called from provision_longhorn_disks.yml.
+#
+# The mountpoint is recovered from the escaped unit name (systemd-escape
+# --unescape on the unit name without the .mount suffix reproduces the
+# original path exactly, including dashes).  Longhorn still holds live
+# replicas on the disk → the unit is refused loudly (evacuate the disk
+# first, e.g. by rebalancing those replicas away); data is never wiped
+# here either way.
+#
+# Busy-safe ordering: a failed stop (busy replicas, or anything else we do
+# not understand) leaves the disable/remove chain out and keeps the unit
+# file — and with it the re-run recovery path — in place.
+
+- name: "stale unit {{_longhorn_unit}}: recover original mountpoint"
+  ansible.builtin.command: "systemd-escape --unescape '{{_longhorn_unit}}'"
+  register: _longhorn_stale_unit_path
+  changed_when: false
+
+- name: "stale unit {{_longhorn_unit}}: check whether config still covers it"
+  ansible.builtin.set_fact:
+    _longhorn_stale_unit_covered: >-
+      {{ (_longhorn_stale_unit_path.stdout
+          in (longhorn_node_disks | default({}) | dict2items
+              | map(attribute='value.path') | list)) }}
+
+- name: "stale unit {{_longhorn_unit}}: keep (covered by config, not stale)"
+  ansible.builtin.debug:
+    msg: "mount unit {{_longhorn_unit}} maps to {{_longhorn_stale_unit_path.stdout}} — still covered, keeping."
+  when: _longhorn_stale_unit_covered | bool
+  changed_when: false
+
+- name: "stale unit {{_longhorn_unit}}: stop"
+  # ignore_errors (not failed_when) so the registered result KEEPS failed:
+  # true — failed_when would rewrite the failure away and make the busy check
+  # below unreachable, and the busy case must not proceed to disable/delete.
+  ansible.builtin.systemd:
+    name: "{{_longhorn_unit}}.mount"
+    state: stopped
+  register: _longhorn_stale_stop
+  when: not (_longhorn_stale_unit_covered | bool)
+  ignore_errors: true
+
+- name: "stale unit {{_longhorn_unit}}: disable"
+  ansible.builtin.systemd:
+    name: "{{_longhorn_unit}}.mount"
+    enabled: false
+    daemon_reload: true
+  when: >-
+    not (_longhorn_stale_unit_covered | bool) and
+    not (_longhorn_stale_stop is failed)
+
+- name: "stale unit {{_longhorn_unit}}: remove unit file"
+  # Only for a disk that stopped: deleting the unit file of a still-mounted
+  # disk would remove it from list-unit-files, and the header's "re-run to
+  # finish unmounting" path could never fire again (mount lingers until
+  # reboot).  Busy disks keep their unit; the warning below says what to do.
+  ansible.builtin.file:
+    path: "/etc/systemd/system/{{_longhorn_unit}}.mount"
+    state: absent
+  when: >-
+    not (_longhorn_stale_unit_covered | bool) and
+    not (_longhorn_stale_stop is failed)
+
+- name: "stale unit {{_longhorn_unit}}: warn about busy disk"
+  ansible.builtin.debug:
+    msg: >-
+      mount unit {{_longhorn_unit}} ({{_longhorn_stale_unit_path.stdout}})
+      could not be unmounted — most likely active Longhorn replicas (or
+      another stop failure) on this disk.  The disk stays mounted and its
+      Node CR entry is removed; evacuate the replicas (longhorn UI: volume
+      rebalancing / delete stale replicas), then re-run to finish unmounting.
+  when: >-
+    not (_longhorn_stale_unit_covered | bool) and
+    _longhorn_stale_stop is failed
+  changed_when: true

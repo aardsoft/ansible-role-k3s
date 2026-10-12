@@ -28,7 +28,11 @@ volumeBindingMode: Immediate
 parameters:
   {% for _param, _value in (_sc.parameters | default({})).items() %}
   {% if _param != 'fsType' %}
-  {{ _param }}: "{{ _value }}"
+  # CSI parameters are plain strings; Longhorn's ParseStringSlice accepts
+  # comma-separated values for list parameters (e.g. diskSelector).  Non-
+  # string scalars (an unquoted numberOfReplicas: 3) pass through as-is —
+  # join() iterates its argument and would die on an int.
+  {{ _param }}: "{{ _value if _value is string else (_value | join(',') if _value is iterable else _value) }}"
   {% endif %}
   {% endfor %}
   fsType: "{{ _sc.parameters.fsType | default('ext4') }}"

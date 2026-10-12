@@ -1,8 +1,80 @@
+- name: require longhorn.manifest
+  # First task: the deploy task's lookup dies with a raw "could not find
+  # file"/no-attribute error on a cluster config that predates the
+  # per-version manifests — an assert placed after it would never run.  And
+  # nothing defaults it: a silent default would upgrade whoever forgot the
+  # key as a side effect of re-running.
+  ansible.builtin.assert:
+    that: _k3s_cfg.longhorn.manifest is defined
+    fail_msg: >-
+      _k3s_cfg.longhorn.manifest is required — name the release to deploy
+      (files/longhorn/longhorn-<manifest>.yaml).  Upgrades go to the next
+      minor only, one manifest per playbook run, verified between hops.
+
 - name: deploy longhorn
+  # Version comes from _k3s_cfg.longhorn.manifest ("1.13.0" etc.) — the
+  # matching file lives at files/longhorn/longhorn-<manifest>.yaml.  Static
+  # manifests are the upstream release "helm template" output; upgrades only
+  # ship to the NEXT minor (no skips) and run one manifest per playbook run,
+  # each verified before the next
   kubernetes.core.k8s:
     kubeconfig: "{{_k3s_kubecfg}}"
     state: present
-    definition: "{{lookup('file', 'longhorn/longhorn.yaml')}}"
+    definition: "{{lookup('file', 'longhorn/longhorn-' ~ _k3s_cfg.longhorn.manifest ~ '.yaml')}}"
+
+# Tier configuration: tiers come from two sources, combined — explicit
+# declarations in _k3s_cfg.longhorn.tiers ({}-valued tiers are valid) and the
+# tiers referenced by any cluster node's longhorn_volumes entries.  Each
+# derived StorageClass longhorn-<tier> selects the tier's disks via the
+# diskSelector parameter; numberOfReplicas is only set when the tier config
+# pins it (the chart global default of 3 replicas stays authoritative — a
+# lower value would be a downgrade from the cluster default).
+- name: validate longhorn_volumes tier declarations
+  # map(attribute='tier') below dies with a raw Jinja error on a tier-less
+  # entry, before the readable per-disk assert in provision_longhorn_disk.yml
+  # ever runs (the infrastructure deploy precedes per-node provisioning).
+  ansible.builtin.assert:
+    that: _lh_untiered | length == 0
+    fail_msg: >-
+      longhorn_volumes entries without a tier in the
+      {{ k3s_clusters[k3s_cluster] | default(k3s_cluster) }} group:
+      {{ _lh_untiered | map(attribute='name') | join(', ') }}
+      — tier is required (it names the disk tag, the derived longhorn-<tier>
+      StorageClass and the mountpoint).
+  vars:
+    _lh_untiered: >-
+      {{ (groups[k3s_clusters[k3s_cluster]] | default([]))
+         | map('extract', hostvars, 'longhorn_volumes')
+         | select('defined')
+         | sum(start=[])
+         | rejectattr('tier', 'defined')
+         | list }}
+
+- name: index tiers used by cluster nodes
+  ansible.builtin.set_fact:
+    _longhorn_used_tiers: >-
+      {{ ((groups[k3s_clusters[k3s_cluster]] | default([])
+           | map('extract', hostvars, 'longhorn_volumes')
+           | select('defined')
+           | sum(start=[])
+           | map(attribute='tier')
+           | list)
+          + (_k3s_cfg.longhorn.tiers | default({}) | dict2items | map(attribute='key') | list))
+         | unique }}
+
+- name: build tier StorageClass parameters
+  # {%-/-%} trim markers: a folded set_fact template must render to exactly
+  # one expression for Ansible to return a dict — stray whitespace between
+  # the block tags would leave the fact as a string and break combine().
+  ansible.builtin.set_fact:
+    _longhorn_tier_classes: >-
+      {%- set _tiers = _k3s_cfg.longhorn.tiers | default({}) -%}
+      {%- set _t = {} -%}
+      {%- for _tn in _longhorn_used_tiers -%}
+      {%- set _tp = (_tiers[_tn].parameters | default({})) if _tn in _tiers else {} -%}
+      {%- set _ = _t.update({'longhorn-' ~ _tn: {'parameters': {'diskSelector': [_tn]} | combine(_tp)}}) -%}
+      {%- endfor -%}
+      {{ _t }}
 
 # Per-workload StorageClasses (see templates/longhorn-storageclass.yml.j2;
 # config in _k3s_cfg.longhorn.storage_classes).  The chart's default
@@ -33,16 +105,116 @@
   loop_control:
     loop_var: _desired
     label: "{{_desired.metadata.name}}"
-  when: _k3s_cfg.longhorn.storage_classes | default({}) | length > 0 and
+  when: (_k3s_cfg.longhorn.storage_classes | default({}) | length > 0 or
+        _longhorn_used_tiers | length > 0) and
         _desired | k3s_content_changed(_longhorn_sc_index[_desired.metadata.name] | default(none))
   vars:
     _desired_longhorn_storage_classes: "{{ lookup('template', 'longhorn-storageclass.yml.j2') | from_yaml_all | select('mapping') | list }}"
-    _np_longhorn_storage_classes: "{{_k3s_cfg.longhorn.storage_classes}}"
+    # combine order: explicit storage_classes WIN over the derived tier
+    # classes (a hand-tuned class overrides the same-named derived one)
+    _np_longhorn_storage_classes: >-
+      {{ (_longhorn_tier_classes
+          | combine(_k3s_cfg.longhorn.storage_classes | default({}))) }}
 
-# StorageClasses are global objects; a name change in the config would leave
+# STORAGE_CLASSES are global objects; a name change in the config would leave
 # the old class behind (no automatic cleanup — classes in use are bound PVCs'
 # immutable references, so deleting a still-referenced class would break the
 # cluster; remove manually once any claims using it are gone).
+
+# Default class is opt-in: by default k3s's local-path stays the cluster
+# fallback and every ansible-managed workload names its storageClass
+# explicitly. If _k3s_cfg.longhorn.default_class is set, that class gets the
+# storageclass.kubernetes.io/is-default-class annotation and every other class
+# (ours and foreign, e.g. local-path) is stripped of it — only ONE class may
+# carry the annotation, otherwise the apiserver picks effectively at random.
+- name: query all storage classes
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+  register: _longhorn_all_sc
+  when: _k3s_cfg.longhorn.default_class is defined
+
+- name: flag longhorn.default_class as the default storage class
+  # Two separate tasks instead of one conditional value: a merge patch
+  # deletes an annotation only with a JSON null, and 'none' rendered through
+  # a template scalar becomes the empty STRING (folded-whitespace trap:
+  # '{{- ... -}} + {{ x else none }}' would yield " true" / "", which is
+  # neither "true" nor null).  Literal YAML None in the set task's sibling
+  # deletes the key cleanly.
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    merge_type: merge
+    kind: StorageClass
+    name: "{{_sc.metadata.name}}"
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: "true"
+  loop: "{{_longhorn_all_sc.resources | default([])}}"
+  loop_control:
+    loop_var: _sc
+    label: "{{_sc.metadata.name}}"
+  when: >
+    _k3s_cfg.longhorn.default_class is defined and
+    _sc.metadata.name == _k3s_cfg.longhorn.default_class and
+    (_sc.metadata.annotations | default({})).get('storageclass.kubernetes.io/is-default-class', '') != 'true'
+
+- name: strip is-default-class from every other storage class
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: patched
+    merge_type: merge
+    kind: StorageClass
+    name: "{{_sc.metadata.name}}"
+    definition:
+      metadata:
+        annotations:
+          storageclass.kubernetes.io/is-default-class: null
+  loop: "{{_longhorn_all_sc.resources | default([])}}"
+  loop_control:
+    loop_var: _sc
+    label: "{{_sc.metadata.name}}"
+  when: >
+    _k3s_cfg.longhorn.default_class is defined and
+    _sc.metadata.name != _k3s_cfg.longhorn.default_class and
+    (_sc.metadata.annotations | default({})).get('storageclass.kubernetes.io/is-default-class', '') == 'true'
+
+# Advisory check: a tier whose class carries the global replica default
+# (currently 3) needs at least that many nodes claiming the tier's disks.
+# Replicas have nothing to schedule onto otherwise and the PVCs stay
+# Pending.  Tier-classes with an explicit numberOfReplicas are assumed to
+# reflect an intentional placement decision.
+- name: warn about tiers with too few nodes for configured replicas
+  ansible.builtin.debug:
+    msg: >-
+      Longhorn tier {{ _lh_tier }}: {{ _lh_tier_nodes | length }} node(s) claim it
+      [{{ _lh_tier_nodes | join(', ') }}] but volumes in its class
+      (longhorn-{{ _lh_tier }}) default to {{ _lh_tier_replicas }} replicas.
+      Replicas that have no tagged disk to land on leave PVCs Pending.  Either
+      provision matching disks via longhorn_volumes on more nodes, or pin an
+      explicit numberOfReplicas in _k3s_cfg.longhorn.tiers.{{ _lh_tier }}.parameters.
+  vars:
+    _lh_tier_nodes: >-
+      {%- set _n = [] -%}
+      {%- for _h in groups[k3s_clusters[k3s_cluster]] | default([]) -%}
+      {%- if hostvars[_h].longhorn_volumes is defined and
+            hostvars[_h].longhorn_volumes | map(attribute='tier')
+            | select('equalto', _lh_tier) | list | length > 0 -%}
+      {%- set _ = _n.append(_h) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ _n }}
+    _lh_tier_replicas: >-
+      {{ _longhorn_tier_classes['longhorn-' ~ _lh_tier].parameters.numberOfReplicas
+         | default('3') | int }}
+  when: >-
+    _lh_tier_nodes | length < (_lh_tier_replicas | int)
+  loop: "{{_longhorn_used_tiers}}"
+  loop_control:
+    loop_var: _lh_tier
+    label: "{{_lh_tier}}"
 
 - name: create longhorn-ui ingress
   kubernetes.core.k8s:
