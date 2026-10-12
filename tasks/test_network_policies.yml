@@ -11,16 +11,30 @@
 #   client-dmz     -> internet (1.1.1.1:80)      expect: reachable  (dmz egress)
 #   client-dmz     -> server-clustersvc:8080     expect: reachable  (cluster-service egress)
 #   client-dmz     -> server-default:8080        expect: blocked    (default deny)
+#   client-api     -> Kubernetes API server :443 expect: reachable  (api-server opt-in egress)
+#   client-default -> Kubernetes API server :443 expect: blocked    (API egress is opt-in)
 #
 # System / infrastructure tests:
 #   test pod       -> cluster DNS                 expect: reachable  (internal dns)
 #   test pod       -> external DNS                expect: reachable  (upstream dns, guarded)
 #   cert-manager   -> Kubernetes API server :443   expect: reachable  (https egress, guarded)
 #   cert-manager   -> ACME server :443            expect: reachable  (https egress, guarded)
-#   longhorn-system -> longhorn-backend :9500     expect: reachable  (intra-namespace)
-#   cert-manager   -> tinydns-sidecar :8080        expect: reachable  (cross-namespace service)
+#   longhorn-system -> longhorn-frontend :80      expect: reachable  (intra-namespace)
+#   kube-system    -> app-ns backend :8080        expect: reachable  (traefik's route into managed ns)
 #   kube-system    -> Kubernetes API server :443   expect: reachable  (infra pods need API)
 #   longhorn-system -> Kubernetes API server :443 expect: reachable  (longhorn-manager needs API)
+#   client-api (curl pod, regular ns) -> API :443   expect: reachable  (network/api-server opt-in;
+#                                                                      post-DNAT destination node:6443)
+#   client-noapi (curl pod, regular ns) -> API :443 expect: blocked    (opt-in only, no blanket egress)
+#   (API probes run in curlimages/curl pods — busybox's TLS stack cannot
+#    negotiate with kube-apiserver; see the pod-deployment comment below)
+#
+# Workload-dependent probes (deployed services, external sidecar URLs) and
+# cluster-specific reachability checks do NOT belong here — they live in
+# tasks/test_workload_reachability.yml, which runs AFTER the applications
+# phase (probes for services that may not exist yet would fail here), and
+# are configured per cluster as network_policies.reachability_tests.  See
+# that file's header for the schema.
 #
 # Variables:
 #   _np_test_namespace            override test namespace name (default: netpol-test)
@@ -72,6 +86,11 @@
     _np_cert_manager_ns_exists: "{{ (_np_cert_manager_ns.resources | default([])) | length > 0 }}"
     _np_longhorn_ns_exists: "{{ (_np_longhorn_ns.resources | default([])) | length > 0 }}"
 
+# The cert-manager->sidecarURL probe has moved to
+# tasks/test_workload_reachability.yml (runs after the applications phase,
+# collects its own _np_sidecar_targets from the issuer config) — earlier this
+# file kept a duplicate collection that was never consumed.
+
 - name: initialise test state
   set_fact:
     _np_test_ns: "{{_np_test_namespace | default('netpol-test')}}"
@@ -101,7 +120,7 @@
       vars:
         _np_test_mode: true
 
-    # ── test pod: unlabelled server ──────────────────────────────────────────
+    # test pod: unlabelled server
     # Server pods use a busybox nc listen loop rather than httpd: httpd is not
     # present in all busybox image builds, whereas nc -l is always available.
     # The loop responds to every connection with a minimal HTTP 200 header so
@@ -121,7 +140,7 @@
           spec:
             containers:
               - name: server
-                image: busybox
+                image: busybox:1.34.1
                 command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\r\n\r\nOK' | nc -l -p 8080; done"]
       changed_when: false
 
@@ -143,7 +162,7 @@
                 targetPort: 8080
       changed_when: false
 
-    # ── test pod: cluster-service server ────────────────────────────────────
+    # test pod: cluster-service server
     - name: deploy server-clustersvc pod
       kubernetes.core.k8s:
         kubeconfig: "{{_k3s_kubecfg}}"
@@ -160,7 +179,7 @@
           spec:
             containers:
               - name: server
-                image: busybox
+                image: busybox:1.34.1
                 command: ["sh", "-c", "while true; do printf 'HTTP/1.0 200 OK\r\n\r\nOK' | nc -l -p 8080; done"]
       changed_when: false
 
@@ -182,7 +201,7 @@
                 targetPort: 8080
       changed_when: false
 
-    # ── test pod: unlabelled client ─────────────────────────────────────────
+    # test pod: unlabelled client
     - name: deploy client-default pod
       kubernetes.core.k8s:
         kubeconfig: "{{_k3s_kubecfg}}"
@@ -198,11 +217,11 @@
           spec:
             containers:
               - name: client
-                image: busybox
+                image: busybox:1.34.1
                 command: ["sleep", "3600"]
       changed_when: false
 
-    # ── test pod: DMZ client ────────────────────────────────────────────────
+    # test pod: DMZ client
     - name: deploy client-dmz pod
       kubernetes.core.k8s:
         kubeconfig: "{{_k3s_kubecfg}}"
@@ -219,11 +238,61 @@
           spec:
             containers:
               - name: client
-                image: busybox
+                image: busybox:1.34.1
                 command: ["sleep", "3600"]
       changed_when: false
 
-    # ── wait for all pods ───────────────────────────────────────────────────
+    # test pod: API-server opt-in client pair
+    # Labeled network/api-server: opts into allow-api-server-egress (the
+    # ONLY regular workloads with Kubernetes API egress).  The unlabeled
+    # twin keeps the same path denied — this pod pair is the regression pair
+    # for the opt-in posture (tests 15/16).
+    # Both run curlimages/curl: busybox's built-in TLS stack cannot negotiate
+    # with kube-apiserver at all (TLS alert 40 handshake failure; the "reset
+    # by peer" reports under docker-library/busybox#162 are the same
+    # phenomenon), and a TLS-crippled wget makes both API probes vacuous:
+    # reachable never succeeds, blocked always "passes".  busybox:1.34.1
+    # stays for the nc/DNS probes, where its plain-TCP tools are fine.
+    - name: deploy client-api pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-client-api
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-client-api
+              network/api-server: "true"
+          spec:
+            containers:
+              - name: client
+                image: curlimages/curl:8.5.0
+                command: ["sleep", "3600"]
+      changed_when: false
+
+    - name: deploy client-noapi pod
+      kubernetes.core.k8s:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        state: present
+        definition:
+          apiVersion: v1
+          kind: Pod
+          metadata:
+            name: np-test-client-noapi
+            namespace: "{{_np_test_ns}}"
+            labels:
+              app: np-test-client-noapi
+          spec:
+            containers:
+              - name: client
+                image: curlimages/curl:8.5.0
+                command: ["sleep", "3600"]
+      changed_when: false
+
+    # wait for all pods
     # Check both pod phase (Running) and container readiness (ready: true).
     # Phase alone is insufficient: a pod cycling through CrashLoopBackOff has
     # phase=Running even while its containers are in Waiting state.
@@ -233,28 +302,59 @@
         kind: Pod
         namespace: "{{_np_test_ns}}"
         label_selectors:
-          - app in (np-test-server-default, np-test-server-clustersvc, np-test-client-default, np-test-client-dmz)
+          - app in (np-test-server-default, np-test-server-clustersvc, np-test-client-default, np-test-client-dmz, np-test-client-api, np-test-client-noapi)
       register: _np_test_pods
       until: >
-        _np_test_pods.resources | length == 4 and
+        _np_test_pods.resources | length == 6 and
         _np_test_pods.resources | map(attribute='status.phase') | list | unique == ['Running'] and
         (_np_test_pods.resources |
          map(attribute='status.containerStatuses') |
          reject('equalto', None) | flatten |
-         selectattr('ready', 'equalto', true) | list | length) == 4
+         selectattr('ready', 'equalto', true) | list | length) == 6
       retries: 30
       delay: 5
 
-    # ── wait for network policy controller ──────────────────────────────────
-    # kube-router NPM processes pod creation events asynchronously.  After pods
-    # reach Running state their IPs may not yet be in the iptables ipsets that
-    # back the label-selector egress/ingress rules.  A brief pause lets the
-    # controller reconcile before we run connectivity checks.
-    - name: wait for network policy controller to process new pods
-      pause:
-        seconds: 15
+    # no forced resync before the probes, deliberately
+    # The test pods were created AFTER the policies were applied, and the
+    # controller's pod-event path updates per-pod enforcement a few seconds
+    # after a pod becomes Ready; until then an unprogrammed pod is
+    # UNFILTERED.  Forcing a controller resync here would kick the very
+    # mechanism the suite is meant to observe — a green "blocked" run would
+    # prove the kicked controller, not what out-of-band pods get — so every
+    # probe whose expectation depends on enforcement being programmed
+    # carries its own retry loop (12x5s), matching what production pods
+    # experience.
+    #
+    # All non-API suite pods pin busybox:1.34.1 (pinned tag beats floating);
+    # API probe pods run curlimages/curl because a TLS-crippled client makes
+    # the API probes meaningless: reachable never succeeds and blocked
+    # always "passes" (see the client-api pod comment).
 
-    # ── connectivity tests ──────────────────────────────────────────────────
+    # Kubernetes API service ClusterIP
+    # Tests 9/13/14 probe the API server through its service.  Take the IP
+    # from the live kubernetes service instead of hardcoding the first
+    # service-cidr address — clusterIPs[0] is the primary family of a
+    # dual-stack config.
+    - name: get the Kubernetes API service ClusterIP
+      kubernetes.core.k8s_info:
+        kubeconfig: "{{_k3s_kubecfg}}"
+        kind: Service
+        namespace: default
+        name: kubernetes
+      register: _np_api_service
+
+    - name: store the API ClusterIP
+      set_fact:
+        _np_api_clusterip: "{{_np_api_service.resources[0].spec.clusterIPs[0] |
+                              default(_np_api_service.resources[0].spec.clusterIP)}}"
+      when: _np_api_service.resources | length > 0
+
+    - name: default the API ClusterIP (service lookup failed)
+      set_fact:
+        _np_api_clusterip: "{{_k3s_cfg.service_cidr.split(',') | reject('search', ':') | first | ansible.utils.ipaddr('1')}}"
+      when: _np_api_service.resources | length == 0
+
+    # connectivity tests
     # Tests use `kubectl exec` via ansible.builtin.command rather than
     # kubernetes.core.k8s_exec: the k8s_exec module tries to parse the OCI
     # runtime error string as an integer exit code and raises ValueError when
@@ -267,9 +367,16 @@
     # half-close, when stdin reaches EOF).
     # Blocked tests use a plain `printf | nc` since a refused/rejected
     # connection returns immediately; no sleep needed.
-    # All tests use ignore_errors so every test runs before the summary.
+    # Every probe is wrapped in a retries-until loop (12x5s) covering the
+    # controller's pod-event lag; the loop's exit code IS the expectation:
+    # achieved = rc 0, never achieved after 60s = rc 1.  For blocking probes
+    # that flips the shell semantics vs. a plain probe — `until ! <probe>`
+    # exits 0 when the path is blocked — so each blocked test's pass
+    # condition below is `rc == 0`, deliberately OPPOSITE of the expectation
+    # word.  All tests use ignore_errors so every test runs before the
+    # summary.
 
-    - name: "test 1/14: default client -> cluster-service server (expect: reachable)"
+    - name: "test 1/16: default client -> cluster-service server (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -282,7 +389,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+          - "n=0; until { printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t1
       ignore_errors: true
       changed_when: false
@@ -290,7 +397,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'default -> cluster-service', 'expect': 'reachable', 'pass': _np_t1.rc == 0, 'rc': _np_t1.rc}]}}"
 
-    - name: "test 2/14: default client -> default server (expect: blocked)"
+    - name: "test 2/16: default client -> default server (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -303,15 +410,15 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+          - "n=0; until ! printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t2
       ignore_errors: true
       changed_when: false
 
     - set_fact:
-        _np_test_results: "{{_np_test_results + [{'name': 'default -> default server', 'expect': 'blocked', 'pass': _np_t2.rc != 0, 'rc': _np_t2.rc}]}}"
+        _np_test_results: "{{_np_test_results + [{'name': 'default -> default server', 'expect': 'blocked', 'pass': _np_t2.rc == 0, 'rc': _np_t2.rc}]}}"
 
-    - name: "test 3/14: default client -> internet (expect: blocked)"
+    - name: "test 3/16: default client -> internet (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -324,15 +431,15 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+          - "n=0; until ! printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t3
       ignore_errors: true
       changed_when: false
 
     - set_fact:
-        _np_test_results: "{{_np_test_results + [{'name': 'default -> internet', 'expect': 'blocked', 'pass': _np_t3.rc != 0, 'rc': _np_t3.rc}]}}"
+        _np_test_results: "{{_np_test_results + [{'name': 'default -> internet', 'expect': 'blocked', 'pass': _np_t3.rc == 0, 'rc': _np_t3.rc}]}}"
 
-    - name: "test 4/14: dmz client -> internet (expect: reachable)"
+    - name: "test 4/16: dmz client -> internet (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -345,7 +452,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP"
+          - "n=0; until { printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 {{_np_inet_ip}} {{_np_inet_port}} | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t4
       ignore_errors: true
       changed_when: false
@@ -353,7 +460,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'dmz -> internet', 'expect': 'reachable', 'pass': _np_t4.rc == 0, 'rc': _np_t4.rc}]}}"
 
-    - name: "test 5/14: dmz client -> cluster-service server (expect: reachable)"
+    - name: "test 5/16: dmz client -> cluster-service server (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -366,7 +473,7 @@
           - "--"
           - sh
           - "-c"
-          - "{ printf 'GET / HTTP/1.0\r\n\r\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP"
+          - "n=0; until { printf 'GET / HTTP/1.0\\r\\n\\r\\n'; sleep 2; } | nc -w 5 np-test-server-clustersvc 8080 | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t5
       ignore_errors: true
       changed_when: false
@@ -374,7 +481,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'dmz -> cluster-service', 'expect': 'reachable', 'pass': _np_t5.rc == 0, 'rc': _np_t5.rc}]}}"
 
-    - name: "test 6/14: dmz client -> default server (expect: blocked)"
+    - name: "test 6/16: dmz client -> default server (expect: blocked)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -387,19 +494,19 @@
           - "--"
           - sh
           - "-c"
-          - "printf 'GET / HTTP/1.0\r\n\r\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP"
+          - "n=0; until ! printf 'GET / HTTP/1.0\\r\\n\\r\\n' | nc -w 3 np-test-server-default 8080 | grep -q HTTP; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t6
       ignore_errors: true
       changed_when: false
 
     - set_fact:
-        _np_test_results: "{{_np_test_results + [{'name': 'dmz -> default server', 'expect': 'blocked', 'pass': _np_t6.rc != 0, 'rc': _np_t6.rc}]}}"
+        _np_test_results: "{{_np_test_results + [{'name': 'dmz -> default server', 'expect': 'blocked', 'pass': _np_t6.rc == 0, 'rc': _np_t6.rc}]}}"
 
-    # ── system / infrastructure tests ───────────────────────────────────────
+    # system / infrastructure tests
     # These use temporary busybox pods in real namespaces to verify that
     # infrastructure components can communicate after policies are applied.
 
-    - name: "test 7/14: internal DNS resolution (expect: reachable)"
+    - name: "test 7/16: internal DNS resolution (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -423,7 +530,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'internal DNS resolution', 'expect': 'reachable', 'pass': _np_t7.rc == 0, 'rc': _np_t7.rc}]}}"
 
-    - name: "test 8/14: external DNS resolution (expect: reachable)"
+    - name: "test 8/16: external DNS resolution (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -448,7 +555,12 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'external DNS resolution', 'expect': 'reachable', 'pass': (_np_t8.skipped | default(false)) or ((_np_t8.rc | default(-1)) == 0), 'rc': _np_t8.rc | default('skipped')}]}}"
 
-    - name: "test 9/14: API server HTTPS from cert-manager (expect: reachable)"
+    - name: "test 9/16: API server HTTPS from cert-manager (expect: reachable)"
+      # curlimages/curl, not busybox: busybox's TLS stack cannot negotiate
+      # with kube-apiserver, so a wget-based API probe is vacuous —
+      # reachable never succeeds.  Pass condition as in test 15: retry
+      # while http_code is 000; any response (401 included — k3s /healthz
+      # requires auth) proves the path through netpol + TLS.
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -458,7 +570,7 @@
           - -n
           - cert-manager
           - api-test-certmanager
-          - --image=busybox:1.36
+          - --image=curlimages/curl:8.5.0
           - --restart=Never
           - --labels=app.kubernetes.io/name=cert-manager
           - --rm
@@ -466,7 +578,7 @@
           - --
           - sh
           - "-c"
-          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+          - "n=0; out=''; until { out=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' https://{{_np_api_clusterip}}:443/healthz); [ \"$out\" != \"000\" ]; }; do n=$((n+1)); [ $n -ge 12 ] && { echo \"last attempt code: $out\" >&2; exit 1; }; sleep 5; done"
       register: _np_t9
       ignore_errors: true
       changed_when: false
@@ -475,7 +587,7 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'API server HTTPS from cert-manager', 'expect': 'reachable', 'pass': (_np_t9.skipped | default(false)) or ((_np_t9.rc | default(-1)) == 0), 'rc': _np_t9.rc | default('skipped')}]}}"
 
-    - name: "test 10/14: cert-manager -> ACME server HTTPS (expect: reachable)"
+    - name: "test 10/16: cert-manager -> ACME server HTTPS (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -487,12 +599,15 @@
           - cm-test-acme
           - --image=busybox:1.36
           - --restart=Never
+          - --labels=app.kubernetes.io/name=cert-manager
           - --rm
           - -i
           - --
           - sh
           - "-c"
-          - "nc -z -w 5 {{_np_test_acme_endpoint}} 443"
+          - "wget -qO- --timeout=5 https://{{_np_test_acme_endpoint}}/ | grep -q '{'"
+          # wget probe, not nc: busybox nc in kubectl-run pods gives silent
+          # instant rc=1 false negatives, while wget probes stay reliable
       register: _np_t10
       ignore_errors: true
       changed_when: false
@@ -501,7 +616,14 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'cert-manager -> ACME HTTPS', 'expect': 'reachable', 'pass': (_np_t10.skipped | default(false)) or ((_np_t10.rc | default(-1)) == 0), 'rc': _np_t10.rc | default('skipped')}]}}"
 
-    - name: "test 11/14: longhorn intra-namespace (expect: reachable)"
+    - name: "test 11/16: longhorn intra-namespace (expect: reachable)"
+      # longhorn-frontend (UI, port 80), NOT longhorn-backend:9500: since
+      # Longhorn 1.12 the upstream manifest ships default ingress netpols
+      # that let only longhorn's own component pods reach the manager API
+      # (longhorn-backend:9500); with them present a generic probe pod
+      # (lh-test-internal, no longhorn labels) is REJECTED there and the
+      # assert aborts the whole serial run.  The UI has no version that
+      # ships a netpol for it, so it is the stable intra-namespace target.
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -518,7 +640,7 @@
           - --
           - sh
           - "-c"
-          - "wget -qO- --timeout=5 http://longhorn-backend:9500/v1 2>/dev/null | head -c 1 | grep -q '{'"
+          - "wget -qO- --timeout=5 http://longhorn-frontend 2>/dev/null | head -c 200 | grep -qi '<'"
       register: _np_t11
       ignore_errors: true
       changed_when: false
@@ -527,7 +649,19 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'longhorn intra-namespace', 'expect': 'reachable', 'pass': (_np_t11.skipped | default(false)) or ((_np_t11.rc | default(-1)) == 0), 'rc': _np_t11.rc | default('skipped')}]}}"
 
-    - name: "test 12/14: cert-manager -> tinydns-sidecar service (expect: reachable)"
+    # system -> application namespace
+    # The ingress backend case: a kube-system pod (traefik's position) dials
+    # an UNLABELLED backend in a managed namespace.  The managed baseline
+    # allows this ingress from system-namespace sources, and the system
+    # baseline must allow the egress — without the application-namespace
+    # egress rule this is blocked and every ingress route to an app backend
+    # returns 502.
+    #
+    # The probe wgets milliseconds after pod creation; the pod-event path
+    # programs enforcement only a few seconds after Ready.  Retry so a
+    # legitimately passing path is not recorded as failed by the
+    # pod-creation race.
+    - name: "test 12/16: kube-system -> app-namespace backend (expect: reachable)"
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -535,8 +669,8 @@
           - "{{_k3s_kubecfg}}"
           - run
           - -n
-          - cert-manager
-          - cm-test-sidecar
+          - kube-system
+          - np-test-app-backend
           - --image=busybox:1.36
           - --restart=Never
           - --rm
@@ -544,16 +678,17 @@
           - --
           - sh
           - "-c"
-          - "nc -z -w 5 tinydns-if1.netconf.svc.cluster.local 8080"
+          - "n=0; until wget -qO- --timeout=5 http://np-test-server-default.{{_np_test_ns}}.svc.cluster.local:8080/ | grep -q OK; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
       register: _np_t12
       ignore_errors: true
       changed_when: false
-      when: _np_cert_manager_ns_exists | default(false) | bool
 
     - set_fact:
-        _np_test_results: "{{_np_test_results + [{'name': 'cert-manager -> tinydns-sidecar', 'expect': 'reachable', 'pass': (_np_t12.skipped | default(false)) or ((_np_t12.rc | default(-1)) == 0), 'rc': _np_t12.rc | default('skipped')}]}}"
+        _np_test_results: "{{_np_test_results + [{'name': 'kube-system -> app-namespace backend (ingress-route path)', 'expect': 'reachable', 'pass': (_np_t12.skipped | default(false)) or ((_np_t12.rc | default(-1)) == 0), 'rc': _np_t12.rc | default('skipped')}]}}"
 
-    - name: "test 13/14: kube-system -> Kubernetes API server (expect: reachable)"
+    - name: "test 13/16: kube-system -> Kubernetes API server (expect: reachable)"
+      # curlimages/curl + http_code, as test 9: a busybox wget API probe is
+      # vacuous (busybox TLS cannot negotiate with kube-apiserver).
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -563,14 +698,14 @@
           - -n
           - kube-system
           - api-test-kubesystem
-          - --image=busybox:1.36
+          - --image=curlimages/curl:8.5.0
           - --restart=Never
           - --rm
           - -i
           - --
           - sh
           - "-c"
-          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+          - "n=0; out=''; until { out=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' https://{{_np_api_clusterip}}:443/healthz); [ \"$out\" != \"000\" ]; }; do n=$((n+1)); [ $n -ge 12 ] && { echo \"last attempt code: $out\" >&2; exit 1; }; sleep 5; done"
       register: _np_t13
       ignore_errors: true
       changed_when: false
@@ -578,7 +713,8 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'kube-system -> Kubernetes API server', 'expect': 'reachable', 'pass': (_np_t13.skipped | default(false)) or ((_np_t13.rc | default(-1)) == 0), 'rc': _np_t13.rc | default('skipped')}]}}"
 
-    - name: "test 14/14: longhorn-system -> Kubernetes API server (expect: reachable)"
+    - name: "test 14/16: longhorn-system -> Kubernetes API server (expect: reachable)"
+      # curlimages/curl + http_code, as tests 9/13.
       ansible.builtin.command:
         argv:
           - /usr/local/bin/kubectl
@@ -588,14 +724,14 @@
           - -n
           - longhorn-system
           - api-test-longhorn
-          - --image=busybox:1.36
+          - --image=curlimages/curl:8.5.0
           - --restart=Never
           - --rm
           - -i
           - --
           - sh
           - "-c"
-          - 'output=$(wget -qO- --timeout=5 https://10.43.0.1:443/healthz 2>&1); echo "$output" | grep -q "Connection refused" && exit 1 || exit 0'
+          - "n=0; out=''; until { out=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' https://{{_np_api_clusterip}}:443/healthz); [ \"$out\" != \"000\" ]; }; do n=$((n+1)); [ $n -ge 12 ] && { echo \"last attempt code: $out\" >&2; exit 1; }; sleep 5; done"
       register: _np_t14
       ignore_errors: true
       changed_when: false
@@ -604,7 +740,69 @@
     - set_fact:
         _np_test_results: "{{_np_test_results + [{'name': 'longhorn-system -> Kubernetes API server', 'expect': 'reachable', 'pass': (_np_t14.skipped | default(false)) or ((_np_t14.rc | default(-1)) == 0), 'rc': _np_t14.rc | default('skipped')}]}}"
 
-    # ── summary and assertion ───────────────────────────────────────────────
+    # app namespace -> Kubernetes API
+    # Destinations are evaluated post-DNAT (kube-proxy DNATs the API
+    # ClusterIP to a node IP on port 6443).  Decision: per-pod opt-in, not
+    # baseline blanket node egress (node mgmt IPs share the CIDR) — test 15
+    # runs from the labeled client-api pod, test 16 verifies the unlabeled
+    # default client stays blocked.
+    - name: "test 15/16: api-server-labeled client -> Kubernetes API server (expect: reachable)"
+      # Reachability semantics for the API: k3s's /healthz answers 401
+      # Unauthorized to an unauthenticated GET, so grepping the response
+      # body can never pass even on a healthy path.  Any HTTP status at all
+      # proves the request traversed netpol + TLS and the server replied,
+      # so the probe accepts any non-000 http_code (000 = curl never got a
+      # response: the netpol-DROP/refusal signature).
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-api
+          - "--"
+          - sh
+          - "-c"
+          - "n=0; out=''; until { out=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' https://{{_np_api_clusterip}}:443/healthz); [ \"$out\" != \"000\" ]; }; do n=$((n+1)); [ $n -ge 12 ] && { echo \"last attempt output: $out\" >&2; exit 1; }; sleep 5; done"
+      register: _np_t15
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'api-server-labeled client -> Kubernetes API server', 'expect': 'reachable', 'pass': _np_t15.rc == 0, 'rc': _np_t15.rc}]}}"
+
+    # app namespace -> Kubernetes API, unlabeled client
+    # The negative of test 15: API egress is an opt-in (allow-api-server-
+    # egress), so the generic client must NOT reach the API.  This is a
+    # blocked probe — the false-FAIL direction of the event lag (unprogrammed
+    # = unfiltered = the request SUCCEEDS inside the ~5s window) — so it
+    # retries until blocked, like the other blocked probes.  Runs in the
+    # curl-based np-test-client-noapi, not the busybox client: a TLS-crippled
+    # wget would record "blocked" even if the path were actually allowed.
+    - name: "test 16/16: default client -> Kubernetes API server (expect: blocked)"
+      ansible.builtin.command:
+        argv:
+          - /usr/local/bin/kubectl
+          - "--kubeconfig"
+          - "{{_k3s_kubecfg}}"
+          - exec
+          - -n
+          - "{{_np_test_ns}}"
+          - np-test-client-noapi
+          - "--"
+          - sh
+          - "-c"
+          - "n=0; out=''; until { out=$(curl -sk --max-time 5 -o /dev/null -w '%{http_code}' https://{{_np_api_clusterip}}:443/healthz); [ \"$out\" = \"000\" ]; }; do n=$((n+1)); [ $n -ge 12 ] && { echo \"last attempt code: $out\" >&2; exit 1; }; sleep 5; done"
+      register: _np_t16
+      ignore_errors: true
+      changed_when: false
+
+    - set_fact:
+        _np_test_results: "{{_np_test_results + [{'name': 'default client -> Kubernetes API server', 'expect': 'blocked', 'pass': _np_t16.rc == 0, 'rc': _np_t16.rc}]}}"
+
+    # summary and assertion
     - name: format test result lines
       set_fact:
         _np_summary_lines: "{{ (_np_summary_lines | default([])) + [line] }}"

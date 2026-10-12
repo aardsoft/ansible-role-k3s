@@ -61,7 +61,9 @@ spec:
 {% if _pod_security_context.fsGroupChangePolicy is defined %}
         fsGroupChangePolicy: {{_pod_security_context.fsGroupChangePolicy}}
 {% endif %}
-{% if _pod_security_context.seccompProfile is defined %}
+{% if _pod_security_context.seccompProfile is defined and _pod_security_context.seccompProfile.type is defined %}
+        # type is what the API schema requires — an empty seccompProfile: {}
+        # would render a schema-invalid null
         seccompProfile:
           type: {{_pod_security_context.seccompProfile.type}}
 {% endif %}

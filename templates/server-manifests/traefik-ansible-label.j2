@@ -11,6 +11,38 @@ spec:
     deployment:
       podLabels:
         managed-by-ansible: "true"
+{% set _np_area_pools = (_k3s_cfg.metallb.pools | default({}, true)) | dict2items
+    | selectattr('value.access_area', 'defined') | list %}
+{%- set _np_areas = [] %}
+{%- for _np_ep_name, _np_ep in (_k3s_cfg.traefik.entrypoints | default({}, true)).items() | sort
+    if _k3s_cfg.network_policies is defined %}
+{%- set _np_pool_name = _np_ep.pool | default(_np_ep_name, true) %}
+{%- for _np_pool in _np_area_pools if _np_pool.key == _np_pool_name %}
+{%- set _ = _np_areas.append(_np_pool.value.access_area) %}
+{%- endfor %}
+{%- endfor %}
+{% if _np_areas | length > 0 %}
+        # LB ingress labels: an entrypoint serving an LB pool opts its pods
+        # into that pool's client access area (metallb.pools.<pool>
+        # .access_area -> allow-<area>-ingress).  Entrypoints derive their
+        # pool by name; `pool:` overrides.  Each area contributes only its
+        # own client CIDRs — a dmz label never implies an open mgmt path and
+        # vice versa.  Without a matching area label, a default-deny
+        # namespace blackholes external LB traffic whenever the MetalLB L2
+        # leader and the pod share a node: direct-path client IPs are
+        # preserved while cross-node paths get SNATed into the pod CIDR the
+        # baseline trusts.
+        #
+        # LIMITATION: the labels above are NOT a separation guarantee
+        # between areas — all entrypoints serve from ONE deployment, so a
+        # pod carrying several areas' labels lets every area's clients reach
+        # every traefik entrypoint port (NetworkPolicy is pod-granular, not
+        # port-per-area).  Real per-area isolation would need port-scoped
+        # per-area ingress policies or per-area deployments.
+{% for _np_area in _np_areas | unique | sort %}
+        network/{{ _np_area }}: "true"
+{% endfor %}
+{%- endif %}
 {% if _k3s_cfg.traefik is defined and _k3s_cfg.traefik.entrypoints is defined %}
     ports:
       web:

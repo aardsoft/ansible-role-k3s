@@ -1,8 +1,50 @@
 # Deploy network policies to system namespaces (kube-system, cert-manager, etc.)
 # These namespaces host core infrastructure and need baseline policies that
 # allow ingress from the node network so API server webhooks and kubelet
-# probes work.  This task runs early in deploy_on_first.yml before any
-# Helm charts deploy into system namespaces.
+# probes work.  This task runs in deploy_infrastructure.yml (phase split,
+# formerly deploy_on_first.yml) before any Helm charts deploy into system
+# namespaces.
+
+- name: check for colliding policy names (dmz / access_areas / service_vlans)
+  # runs first, on the system-deploy file, to fail the run before ANY
+  # policy — infrastructure or application — is applied from a colliding
+  # config; see the identical check in deploy_network_policies.yml for the
+  # full rationale (same-name sections render the same (namespace, name)
+  # and churn forever).
+  ansible.builtin.assert:
+    that: (_np_name_collisions | length) == 0
+    fail_msg: >-
+      Network policy name collision: {{ _np_name_collisions | join(', ') }}
+      is used by more than one of dmz_cidrs / access_areas / service_vlans
+      (or clashes with a built-in name) — both sections would generate the
+      same policy objects and overwrite each other on every run.  Rename one
+      of the entries (pod labels using the shared name must follow, e.g.
+      network/<new-name>: "true" instead of network/<old-name>: "true").
+  vars:
+    _np_name_collisions: "{{ _k3s_cfg.network_policies | k3s_np_name_collisions }}"
+
+- name: check for unresolvable traefik access areas (metallb pools)
+  # Duplicated from deploy_network_policies.yml like the collision assert
+  # above: this file runs in the infrastructure phase, and the hazard
+  # guards against manifests then — inert traefik labels in kube-system
+  # blackhole the LB pools long before the applications-phase copy would
+  # ever fire.  Fail before ANY policy is applied.  See the
+  # applications-phase copy for the full rationale; note the filter counts
+  # only CIDR-defined areas as resolvable (see its docstring) because
+  # namespace-defined zones never render an ingress policy in kube-system.
+  ansible.builtin.assert:
+    that: (_np_unmatched_areas | length) == 0
+    fail_msg: >-
+      MetalLB pool access_area names no network policy section:
+      {{ _np_unmatched_areas | join(', ') }}.  The traefik pod label
+      network/<area> would be rendered but no allow-<area>-ingress policy
+      exists in kube-system to match it, so LB traffic to that pool would
+      be blackholed by the default-deny namespace baseline.  Fix: add a
+      cidr-defined access_areas (or service_vlans) entry with that name,
+      set dmz_cidrs if the pool is DMZ-facing, or correct the pool's
+      access_area value.
+  vars:
+    _np_unmatched_areas: "{{ _k3s_cfg | k3s_np_unmatched_areas }}"
 
 - name: query existing namespaces
   kubernetes.core.k8s_info:
@@ -26,7 +68,13 @@
     kind: NetworkPolicy
     namespace: "{{_ns}}"
     label_selectors:
+      # DUAL selector — role-ownership invariant: k3s-role templates label
+      # their NetworkPolicies with BOTH configurator=ansible and
+      # app.kubernetes.io/managed-by=k3s; k3s-deployments policies carry
+      # managed-by=k3s-deployments (no configurator label on their
+      # NetworkPolicies), so they are not matched by this cleanup.
       - "configurator=ansible"
+      - "app.kubernetes.io/managed-by=k3s"
   loop: "{{_np_existing_system_ns}}"
   loop_control:
     loop_var: _ns

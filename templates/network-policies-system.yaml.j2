@@ -4,16 +4,33 @@
 # These namespaces host core infrastructure components (cert-manager,
 # kube-system, etc.) and need baseline policies that allow ingress from
 # the node network so API server webhooks and kubelet probes work.
+#
+# One "baseline" policy per namespace instead of many single-purpose
+# policies: NetworkPolicy rules inside one policy union, so merging all
+# policies that target ALL pods (default-deny, DNS egress, node network,
+# intra-namespace, system namespace access, cluster-services egress,
+# application-namespace egress) into
+# a single podSelector: {} policy is semantically identical — the kernel
+# still programs the same rule set either way.  Consolidation buys fewer
+# watch events, a readable `kubectl get netpol`, and fewer objects.  Policies
+# with podSelectors
+# that do NOT match all pods (kube-dns, cert-manager, cluster-service,
+# dmz, zone labels) stay separate because merging them would widen their
+# rule targets.
 {% for _namespace in _np_namespaces | default([]) %}
 ---
-# ── default deny ──────────────────────────────────────────────────────────────
+# baseline: default-deny + everything targeting all pods
+# policyTypes lists both directions, so ingress/egress not whitelisted below
+# is denied — that IS the default-deny posture; no separate default-deny-all
+# object is needed.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: default-deny-all
+  name: baseline
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -23,24 +40,30 @@ spec:
   policyTypes:
   - Ingress
   - Egress
----
-# ── DNS egress (all pods -> kube-dns, always) ──────────────────────────────────
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-dns-egress
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
+  ingress:
+  - from:
+  # Node network — API server, kubelet, host-network pods
+  {% for cidr in _np_cfg.k3s_cidrs | default([]) %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+  # Cluster CIDR — pod-to-pod traffic after kube-proxy SNAT
+  {% set _cluster_cidrs = (_k3s_cluster_cidr | default('')).split(',') | reject('equalto', '') | list %}
+  {% set _cluster_ipv4 = _cluster_cidrs | ansible.utils.ipv4 | list %}
+  {% set _cluster_ipv6 = _cluster_cidrs | ansible.utils.ipv6 | list %}
+  {% for cidr in _cluster_ipv4 + _cluster_ipv6 %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+  {% for _sysns in _np_cfg.system_namespaces | default([]) %}
+  {% if _sysns != _namespace %}
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ _sysns }}
+  {% endif %}
+  {% endfor %}
   egress:
+  # DNS resolution is always required
   - to:
     - namespaceSelector:
         matchLabels:
@@ -53,97 +76,66 @@ spec:
       protocol: UDP
     - port: 53
       protocol: TCP
----
-# ── node network ingress (API server, kubelet, host-network pods) ────────────
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-node-network-ingress
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    # Node network — API server, kubelet, host-network pods
-{% for cidr in _np_cfg.k3s_cidrs | default([]) %}
-    - ipBlock:
-        cidr: {{ cidr }}
-{% endfor %}
-    # Cluster CIDR — pod-to-pod traffic after kube-proxy SNAT
-{% set _cluster_cidrs = (_k3s_cluster_cidr | default('')).split(',') | reject('equalto', '') | list %}
-{% set _cluster_ipv4 = _cluster_cidrs | ansible.utils.ipv4 | list %}
-{% set _cluster_ipv6 = _cluster_cidrs | ansible.utils.ipv6 | list %}
-{% for cidr in _cluster_ipv4 + _cluster_ipv6 %}
-    - ipBlock:
-        cidr: {{ cidr }}
-{% endfor %}
----
-# ── node network egress (API server, kubelet, host-network services) ────────
-# Pods in system namespaces (kured, longhorn-manager, cert-manager-webhook,
-# metrics-server, etc.) must reach the Kubernetes API server on the node
-# IP:6443.  kube-proxy DNATs 10.43.0.1:443 → 172.31.248.x:6443, so the
-# effective destination is the node network, not a pod in kube-system.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-to-node-network
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
-  egress:
+  {% for _sysns in _np_cfg.system_namespaces | default([]) %}
+  {% if _sysns != _namespace %}
+  # system namespace {{ _sysns }}: full access
   - to:
-    # Node network — API server, kubelet, host-network pods/services
-{% for cidr in _np_cfg.k3s_cidrs | default([]) %}
-    - ipBlock:
-        cidr: {{ cidr }}
-{% endfor %}
----
-# ── intra-namespace egress (pods in this namespace may talk to each other) ────
-# default-deny-all blocks all egress.  System namespaces host multi-component
-# infrastructure (Longhorn, cert-manager, etc.) where pods must reach peers
-# in the same namespace — e.g. longhorn-manager → instance-manager.
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-intra-namespace
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
-  egress:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ _sysns }}
+  {% endif %}
+  {% endfor %}
+  # intra-namespace egress — system namespaces host multi-component
+  # infrastructure (Longhorn, cert-manager, ...) whose pods must reach peers
+  # in the same namespace — e.g. longhorn-manager → instance-manager
   - to:
     - namespaceSelector:
         matchLabels:
           kubernetes.io/metadata.name: {{ _namespace }}
+  # in-cluster pods labeled network/cluster-service
+  - to:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          network/cluster-service: "true"
+  # node network — API server, kubelet, host-network services.  kube-proxy
+  # DNATs 10.43.0.1:443 → 172.31.248.x:6443, so the effective destination of
+  # API-server traffic (kured, longhorn-manager, cert-manager-webhook,
+  # metrics-server, cainjector) is the node network, not a pod in kube-system.
+  # GUARDED on k3s_cidrs being non-empty: with all CIDRs looped away, a bare
+  # `- to:` + `ports:` would render as allow-ALL destinations on those ports.
+{% if _np_cfg.k3s_cidrs | default([]) | length > 0 %}
+  - to:
+  {% for cidr in _np_cfg.k3s_cidrs %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+{% endif %}
+  # All non-system namespaces: traefik proxies Ingress routes to backends in
+  # application namespaces, so system-namespace pods must be allowed to
+  # initiate connections to them (without this, traefik's egress has no rule
+  # for the target namespace and every ingress route returns 502).  Not an
+  # authorization gap: the TARGET namespace's own ingress policies still
+  # govern the connection — managed namespaces default-deny ingress and
+  # selectively allow system-namespace sources (network-policies.yaml.j2
+  # baseline); excluded namespaces keep their pre-policy behavior.
+  # Destinations are evaluated post-DNAT, so ClusterIP services in these
+  # namespaces also work.
+  - to:
+    - namespaceSelector:
+        matchExpressions:
+        - key: kubernetes.io/metadata.name
+          operator: NotIn
+          values:
+          {% for _ns in ((_np_cfg.system_namespaces | default([])) + ['kube-public', 'kube-node-lease']) | unique %}
+          - {{ _ns }}
+          {% endfor %}
 ---
-# ── coredns upstream DNS egress ────────────────────────────────────────────────
-# CoreDNS in kube-system must reach the upstream DNS resolver (e.g. the node's
+# coredns upstream DNS egress
+# CoreDNS must reach the upstream DNS resolver (e.g. the node's
 # /etc/resolv.conf nameserver).  This policy matches only pods labelled
-# k8s-app=kube-dns; other pods continue to use the cluster DNS via
-# allow-dns-egress.
+# k8s-app=kube-dns; other pods continue to use the cluster DNS via the
+# baseline egress.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -151,6 +143,7 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -173,10 +166,12 @@ spec:
     - port: 53
       protocol: TCP
 ---
-# ── cert-manager HTTPS + DNS egress ───────────────────────────────────────────
+# cert-manager HTTPS + DNS egress
 # All cert-manager pods (controller, webhook, cainjector) need HTTPS egress.
 # The controller talks to ACME servers; webhook and cainjector need to reach
-# the Kubernetes API server for their TLS/webhook configuration.
+# the Kubernetes API server for their TLS/webhook configuration (node egress
+# in baseline doesn't cover :443 to non-DNAT destinations, e.g. cainjector
+# to the ACME directory).
 # Additionally, the controller queries authoritative nameservers directly on
 # UDP/TCP 53 for DNS-01 propagation checks (it does not route these through
 # cluster DNS).
@@ -187,6 +182,7 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -210,77 +206,17 @@ spec:
       protocol: UDP
     - port: 53
       protocol: TCP
----
-# ── system namespace bidirectional access ──────────────────────────────────────
-{% for _sysns in _np_cfg.system_namespaces | default([]) %}
-{% if _sysns != _namespace %}
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-to-{{ _sysns }}
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
-  egress:
-  - to:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: {{ _sysns }}
----
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-from-{{ _sysns }}
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Ingress
-  ingress:
-  - from:
-    - namespaceSelector:
-        matchLabels:
-          kubernetes.io/metadata.name: {{ _sysns }}
-{% endif %}
+{% for _cm_port in _np_cfg.cert_manager_extra_ports | default([]) %}
+    # extra cert-manager egress port (network_policies.cert_manager_extra_ports):
+    # e.g. the tinydns-sidecar ACME webhook calls sidecarURL on a
+    # non-HTTPS port (fi1: http://185.185.170.206:30080); this policy
+    # already covers the webhook pod by its app.kubernetes.io/name=cert-manager
+    # label
+    - port: {{ _cm_port }}
+      protocol: TCP
 {% endfor %}
 ---
-# ── cluster services: all pods may reach them, from any namespace ──────────────
-apiVersion: networking.k8s.io/v1
-kind: NetworkPolicy
-metadata:
-  name: allow-cluster-services-egress
-  namespace: {{ _namespace }}
-  labels:
-    configurator: ansible
-  annotations:
-    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
-    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
-    ansible.version: "{{ansible_version.full}}"
-spec:
-  podSelector: {}
-  policyTypes:
-  - Egress
-  egress:
-  - to:
-    - namespaceSelector: {}
-      podSelector:
-        matchLabels:
-          network/cluster-service: "true"
----
+# cluster-service pods: reachable from any pod in the cluster
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -288,6 +224,7 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -306,7 +243,9 @@ spec:
 {% set _k3s_ipv4 = _np_cfg.k3s_cidrs | default([]) | ansible.utils.ipv4 | list %}
 {% set _k3s_ipv6 = _np_cfg.k3s_cidrs | default([]) | ansible.utils.ipv6 | list %}
 ---
-# ── DMZ: ingress from DMZ CIDRs ───────────────────────────────────────────────
+# DMZ: ingress from DMZ CIDRs
+# Kept separate from the egress policy so ingress-only or egress-only DMZ
+# setups remain expressible.
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -314,6 +253,7 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -326,12 +266,12 @@ spec:
   - Ingress
   ingress:
   - from:
-{% for cidr in _np_cfg.dmz_cidrs %}
+  {% for cidr in _np_cfg.dmz_cidrs %}
     - ipBlock:
         cidr: {{ cidr }}
-{% endfor %}
+  {% endfor %}
 ---
-# ── DMZ: egress to DMZ CIDRs, excluding cluster-internal node CIDRs ───────────
+# DMZ: egress to DMZ CIDRs, excluding cluster-internal node CIDRs
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -339,6 +279,7 @@ metadata:
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -351,38 +292,40 @@ spec:
   - Egress
   egress:
   - to:
-{% for cidr in _np_cfg.dmz_cidrs %}
-{% set _excl = _k3s_ipv6 if ':' in cidr else _k3s_ipv4 %}
+  {% for cidr in _np_cfg.dmz_cidrs %}
+  {% set _excl = _k3s_ipv6 if ':' in cidr else _k3s_ipv4 %}
     - ipBlock:
         cidr: {{ cidr }}
-{% if _excl | length > 0 %}
+  {% if _excl | length > 0 %}
         except:
-{% for excl in _excl %}
+    {% for excl in _excl %}
         - {{ excl }}
-{% endfor %}
+    {% endfor %}
+  {% endif %}
+  {% endfor %}
 {% endif %}
-{% endfor %}
-{% endif %}
-{% for vlan_name, vlan in (_np_cfg.service_vlans | default({})).items() %}
-{% if vlan.vlan is defined %}
-{% set _vlan_cidrs = dhcp_networks[vlan.vlan].subnets | list %}
-{% elif vlan.cidrs is defined %}
-{% set _vlan_cidrs = vlan.cidrs %}
-{% elif vlan.cidr is defined %}
-{% set _vlan_cidrs = [vlan.cidr] %}
-{% else %}
-{% set _vlan_cidrs = [] %}
-{% endif %}
-{% if _vlan_cidrs | length > 0 %}
+{% for _area_name, _area in (_np_cfg.access_areas | default({})).items() %}
+{% if _area.cidrs | default([], true) | length > 0 %}
 ---
-# ── {{ vlan_name }}: ingress from VLAN + from in-cluster pods with access label ─
+# {{ _area_name }}: ingress for CIDR-based access area
+# access_areas entries (network_policies.access_areas) are named client-CIDR
+# sets, independent of VLANs or namespaces.  They are the generic counterpart
+# of dmz_cidrs/service_vlans: LB address pools reference their client area
+# via metallb.pools.<pool>.access_area (entrypoints whose name matches a
+# pool derive the same area automatically); pods opt in with the
+# network/{{ _area_name }}: "true" label.  Same-NAMESPACE pods that need direct
+# (non-LB) access to area-facing pods label themselves
+# network/{{ _area_name }}-access: "true" (the access-egress policy's
+# podSelector has no namespaceSelector, so it matches only the same
+# namespace).
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-{{ vlan_name }}-ingress
+  name: allow-{{ _area_name }}-ingress
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -390,27 +333,28 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      network/{{ vlan_name }}: "true"
+      network/{{ _area_name }}: "true"
   policyTypes:
   - Ingress
   ingress:
   - from:
-{% for cidr in _vlan_cidrs %}
+  {% for cidr in _area.cidrs %}
     - ipBlock:
         cidr: {{ cidr }}
-{% endfor %}
+  {% endfor %}
     - podSelector:
         matchLabels:
-          network/{{ vlan_name }}-access: "true"
+          network/{{ _area_name }}-access: "true"
 ---
-# ── {{ vlan_name }}: egress for pods with access label -> in-cluster + VLAN CIDR ─
+# {{ _area_name }}: egress for pods with access label -> area-facing pods + CIDRs
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
-  name: allow-{{ vlan_name }}-access-egress
+  name: allow-{{ _area_name }}-access-egress
   namespace: {{ _namespace }}
   labels:
     configurator: ansible
+    app.kubernetes.io/managed-by: k3s
   annotations:
     ansible.run-id: "{{ansible_run_id|default('N/A')}}"
     ansible.config_file: "{{ansible_config_file|default('N/A')}}"
@@ -418,18 +362,191 @@ metadata:
 spec:
   podSelector:
     matchLabels:
-      network/{{ vlan_name }}-access: "true"
+      network/{{ _area_name }}-access: "true"
   policyTypes:
   - Egress
   egress:
   - to:
     - podSelector:
         matchLabels:
-          network/{{ vlan_name }}: "true"
-{% for cidr in _vlan_cidrs %}
+          network/{{ _area_name }}: "true"
+  {% for cidr in _area.cidrs %}
     - ipBlock:
         cidr: {{ cidr }}
+  {% endfor %}
+{% endif %}
 {% endfor %}
+{% for _vlan_name, _vlan in (_np_cfg.service_vlans | default({})).items() %}
+{% if _vlan.vlan is defined %}
+{% set _vlan_cidrs = dhcp_networks[_vlan.vlan].subnets | list %}
+{% elif _vlan.cidrs is defined %}
+{% set _vlan_cidrs = _vlan.cidrs %}
+{% elif _vlan.cidr is defined %}
+{% set _vlan_cidrs = [_vlan.cidr] %}
+{% else %}
+{% set _vlan_cidrs = [] %}
+{% endif %}
+{% set _vlan_ns = _vlan.namespace | default('') %}
+{% if _vlan_ns %}
+---
+# {{ _vlan_name }}: egress for access-labeled pods -> zone namespace
+# Namespace-defined zone: the zone target is the namespace {{ _vlan_ns }},
+# not a set of VLAN CIDRs.  Pods opt in with the
+# network/{{ _vlan_name }}-access label; VLAN CIDRs, when also configured,
+# are allowed in the same rules.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ _vlan_name }}-access-egress
+  namespace: {{ _namespace }}
+  labels:
+    configurator: ansible
+    app.kubernetes.io/managed-by: k3s
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  podSelector:
+    matchLabels:
+      network/{{ _vlan_name }}-access: "true"
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ _vlan_ns }}
+  {% for cidr in _vlan_cidrs %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+{% if _namespace == _vlan_ns %}
+---
+# {{ _vlan_name }} zone namespace: all pods reachable from access-labeled pods
+# Rendered only inside the zone namespace ({{ _vlan_ns }}) once it is managed.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ _vlan_name }}-ingress
+  namespace: {{ _namespace }}
+  labels:
+    configurator: ansible
+    app.kubernetes.io/managed-by: k3s
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+    - namespaceSelector: {}
+      podSelector:
+        matchLabels:
+          network/{{ _vlan_name }}-access: "true"
+  {% for cidr in _vlan_cidrs %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+---
+# {{ _vlan_name }} zone namespace: intra-namespace traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ _vlan_name }}-intra
+  namespace: {{ _namespace }}
+  labels:
+    configurator: ansible
+    app.kubernetes.io/managed-by: k3s
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  podSelector: {}
+  policyTypes:
+  - Ingress
+  - Egress
+  ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ _vlan_ns }}
+  egress:
+  - to:
+    - namespaceSelector:
+        matchLabels:
+          kubernetes.io/metadata.name: {{ _vlan_ns }}
+{% endif %}
+{% else %}
+{% if _vlan_cidrs | length > 0 %}
+---
+# {{ _vlan_name }}: ingress from VLAN + from same-namespace pods with access label
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ _vlan_name }}-ingress
+  namespace: {{ _namespace }}
+  labels:
+    configurator: ansible
+    app.kubernetes.io/managed-by: k3s
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  podSelector:
+    matchLabels:
+      network/{{ _vlan_name }}: "true"
+  policyTypes:
+  - Ingress
+  ingress:
+  - from:
+  {% for cidr in _vlan_cidrs %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+    - podSelector:
+        matchLabels:
+          network/{{ _vlan_name }}-access: "true"
+---
+# {{ _vlan_name }}: egress for pods with access label -> same-NAMESPACE
+# pods + VLAN CIDR
+# The first egress target is a podSelector without namespaceSelector, so it
+# matches only pods in THIS namespace.  In a system namespace this rarely
+# matches anything; it exists so the same policy renders identically in
+# every managed namespace.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-{{ _vlan_name }}-access-egress
+  namespace: {{ _namespace }}
+  labels:
+    configurator: ansible
+    app.kubernetes.io/managed-by: k3s
+  annotations:
+    ansible.run-id: "{{ansible_run_id|default('N/A')}}"
+    ansible.config_file: "{{ansible_config_file|default('N/A')}}"
+    ansible.version: "{{ansible_version.full}}"
+spec:
+  podSelector:
+    matchLabels:
+      network/{{ _vlan_name }}-access: "true"
+  policyTypes:
+  - Egress
+  egress:
+  - to:
+    - podSelector:
+        matchLabels:
+          network/{{ _vlan_name }}: "true"
+  {% for cidr in _vlan_cidrs %}
+    - ipBlock:
+        cidr: {{ cidr }}
+  {% endfor %}
+{% endif %}
 {% endif %}
 {% endfor %}
 {% endfor %}

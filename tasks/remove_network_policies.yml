@@ -1,3 +1,16 @@
+# NOTE: this only removes policies owned by this role (configurator=ansible)
+# in the effective namespace list. Per-application policies created by the
+# k3s-deployments companion role are labeled
+# app.kubernetes.io/managed-by=k3s-deployments and are not touched here; each
+# deployment task currently includes its own cleanup helper
+# (k3s-deployments/tasks/cleanup_policies.yml) listing its policies for
+# removal when network policies are disabled.
+# TODO: provide that cleanup as an includable helper from this role, or do a
+# single cluster-wide sweep for label
+# app.kubernetes.io/managed-by=k3s-deployments here, so the per-task
+# boilerplate can be dropped. The label selector is precise (nothing outside
+# k3s-deployments carries it) and a cluster-wide query would also cover
+# kube-system / excluded / system namespaces the per-deployment lists can miss.
 - name: query all namespaces (blacklist mode)
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"

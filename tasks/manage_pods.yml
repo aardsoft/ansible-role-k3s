@@ -9,6 +9,16 @@
     (_pod.value.k3s.state is undefined or _pod.value.k3s.state != "absent") and
     (k3s_pod_limit is undefined or _pod.key in (k3s_pod_limit.split(',') if k3s_pod_limit is string else k3s_pod_limit))
 
+# Note: no network-policy resync after pod deployments.  The kube-router
+# pod-event path programs a new/rolled pod's enforcement within a few
+# seconds of Ready, and until then the pod is unfiltered, so post-deploy
+# consumers cannot fail in the harmful direction: outbound connections in
+# the window succeed unfiltered and still succeed afterwards if the policy
+# allows them.  Probes that DEPEND on enforcement being programmed (blocked
+# expectations in test_network_policies.yml) carry their own retry loops
+# instead — the suite observes the real event path rather than kicking the
+# controller.
+
 - name: destroy absent pods
   include_tasks: destroy_pod.yml
   with_dict: "{{network_pods}}"

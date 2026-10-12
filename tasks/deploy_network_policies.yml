@@ -55,7 +55,14 @@
     kind: NetworkPolicy
     namespace: "{{_ns}}"
     label_selectors:
+      # DUAL selector — the role-ownership invariant: k3s-role templates label
+      # their NetworkPolicies with BOTH configurator=ansible and
+      # app.kubernetes.io/managed-by=k3s.  Do NOT rely on configurator=ansible
+      # alone: k3s-deployments policies carry managed-by=k3s-deployments (and
+      # currently no configurator label on their NetworkPolicies), so this
+      # cleanup must not adopt anything that is not ours.
       - "configurator=ansible"
+      - "app.kubernetes.io/managed-by=k3s"
   loop: "{{_np_namespaces}}"
   loop_control:
     loop_var: _ns
@@ -66,6 +73,47 @@
     _np_existing: >-
       {{ _np_queries.results | map(attribute='resources') | flatten
          | k3s_ns_resource_index }}
+
+- name: check for colliding policy names (dmz / access_areas / service_vlans)
+  # dmz, access_areas and service_vlans all generate allow-<name>-ingress
+  # / allow-<name>-access-egress objects; the same name in two sections
+  # renders two policies sharing a (namespace, name) — sequential apply is
+  # last-wins and the loser re-applies every run (permanent changelog
+  # churn).  Fail before ANY policy from this config is applied.
+  ansible.builtin.assert:
+    that: (_np_name_collisions | length) == 0
+    fail_msg: >-
+      Network policy name collision: {{ _np_name_collisions | join(', ') }}
+      is used by more than one of dmz_cidrs / access_areas / service_vlans
+      (or clashes with a built-in name) — both sections would generate the
+      same policy objects and overwrite each other on every run.  Rename one
+      of the entries (pod labels using the shared name must follow, e.g.
+      network/<new-name>: "true" instead of network/<old-name>: "true").
+
+  vars:
+    _np_name_collisions: "{{ _k3s_cfg.network_policies | k3s_np_name_collisions }}"
+
+- name: check for unresolvable traefik access areas (metallb pools)
+  # Same fail-loudly philosophy as the collision assert above, for the
+  # label-derivation side: a metallb pool's access_area is turned into a
+  # network/<area> pod label on the LB pods (traefik-ansible-label.j2).
+  # If <area> names no access_areas / service_vlans entry (or 'dmz' when
+  # dmz_cidrs is set), no allow-<area>-ingress policy exists to match the
+  # label — it renders but is inert, and external LB traffic to the pool
+  # stays blackholed with no failing task anywhere in the run.  Fail
+  # before any policy is applied.
+  ansible.builtin.assert:
+    that: (_np_unmatched_areas | length) == 0
+    fail_msg: >-
+      MetalLB pool access_area names no network policy section:
+      {{ _np_unmatched_areas | join(', ') }}.  The traefik pod label
+      network/<area> would be rendered but no allow-<area>-ingress policy
+      exists to match it, so LB traffic to that pool would be blackholed
+      by the default-deny namespace baseline.  Fix: add a cidr-defined
+      access_areas (or service_vlans) entry with that name, set dmz_cidrs
+      if the pool is DMZ-facing, or correct the pool's access_area value.
+  vars:
+    _np_unmatched_areas: "{{ _k3s_cfg | k3s_np_unmatched_areas }}"
 
 - name: build desired network policies
   set_fact:
@@ -113,7 +161,11 @@
     kind: NetworkPolicy
     namespace: "{{_ex_ns}}"
     label_selectors:
+      # same dual selector as above — k3s-role policies carry both labels;
+      # k3s-deployments policies (managed-by=k3s-deployments, no
+      # configurator label) are not matched here
       - "configurator=ansible"
+      - "app.kubernetes.io/managed-by=k3s"
   loop: >-
     {{
       (_k3s_cfg.network_policies.system_namespaces | default([])) +
@@ -137,5 +189,48 @@
   loop: "{{_np_excluded_queries.results | map(attribute='resources') | flatten
             | rejectattr('metadata.name', 'in', _k3s_cfg.network_policies | k3s_np_expected_names_system)
             | list}}"
+  loop_control:
+    label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
+
+# ONE-TIME migration to the consolidated policy layout — drop after a
+# release cycle once all clusters have migrated.  The legacy set is
+# defined by label ABSENCE: old-layout policies carry only configurator=ansible;
+# every k3s-role policy since the consolidation also carries
+# app.kubernetes.io/managed-by, and k3s-deployments policies carry
+# managed-by=k3s-deployments (no configurator label).  The `!key`
+# set-requirement selector therefore matches exactly the old layout, with
+# no client-side filtering and no dependence on which managed-by VALUE
+# other writers may choose.  Both stale cleanups above query the dual
+# selector, so old policies would survive forever otherwise.  They are
+# permissive subsets of the new allow rules (union stays permissive, nothing
+# breaks while both exist), but the union masks the new posture: notably old
+# allow-node-network-ingress admits the whole cluster CIDR, so tightening
+# the cluster-CIDR ingress never takes effect until these are gone.  This
+# query is cluster-wide, deliberately including the system namespaces whose
+# policies deploy in deploy_infrastructure.yml — placing the removal AFTER
+# the new set is applied means traffic only ever converges, and the test
+# suite (end of this run) is the first observer of the now-effective
+# posture.
+- name: query legacy managed policies (old layout)
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: networking.k8s.io/v1
+    kind: NetworkPolicy
+    label_selectors:
+      - "configurator=ansible"
+      - "!app.kubernetes.io/managed-by"
+  register: _np_legacy_all
+
+- name: remove legacy managed policies
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: absent
+    definition:
+      apiVersion: networking.k8s.io/v1
+      kind: NetworkPolicy
+      metadata:
+        name: "{{item.metadata.name}}"
+        namespace: "{{item.metadata.namespace}}"
+  loop: "{{_np_legacy_all.resources | default([])}}"
   loop_control:
     label: "{{item.metadata.namespace}}/{{item.metadata.name}}"
