@@ -4,7 +4,12 @@
   register: _k3s_status
 
 - set_fact:
-    _k3s_token: ""
+    # NOT reset: a later plain "" set_fact clobbered the token delegated by
+    # the first server's serial batch (delegate_token.yml), so non-first
+    # servers had an empty token and silently skipped setup_additional.yml
+    # and node upgrades. The self-reference keeps a delegated value; "" on a
+    # first batch stays the starting point.
+    _k3s_token: "{{ _k3s_token | default('') }}"
     _k3s_token_passdb: ""
     _k3s_bind_args: ""
     _k3s_flannel_iface: ""
