@@ -1,18 +1,28 @@
 # Deploy or update k3s pods without running a full cluster setup.
 #
-# This playbook only runs pod management (manage_pods.yml) — it skips cluster
-# bootstrap, infrastructure components (MetalLB, Longhorn, kured), server
-# manifests, deployments, and network policies.
+# This playbook first applies the minimal infrastructure a pod needs
+# (workload_prerequisites.yml: MetalLB pools, Longhorn StorageClasses,
+# Traefik server manifests — idempotent reconciliation only, no component
+# charts), then runs pod management (manage_pods.yml, including pods marked
+# state: absent) and an idempotent network-policy pass, mirroring the full
+# run's infrastructure-pods-policies order.  It skips cluster bootstrap,
+# component deployments (longhorn chart, cert-manager, kured), extra
+# deployments and the network-policy test suite.
+#
+# Pools, StorageClasses and server manifests come from the prerequisite
+# pass above, drawn from the cluster config — so a pod that introduces a
+# new LB address range, storage class or access area needs the new config
+# first, then runs fine from this playbook alone.  Extra deployments:
+# dependencies (e.g. rabbitmq user entries) are a separate deployments.yml
+# run.
 #
 # Usage:
-#   ansible-playbook pods.yml
-#   ansible-playbook pods.yml -l <node>
-#   ansible-playbook pods.yml -l <node> -e k3s_pod_limit=<pod>[,<pod>...]
+#   ansible-playbook pods.yml -l <first-server>
+#   ansible-playbook pods.yml -l <first-server> -e k3s_pod_limit=<pod>[,<pod>...]
 #
 # -l / --limit
-#   Restrict to a specific k3s cluster node.  Pod management tasks only
-#   execute on the first server node, so without -l the play runs against
-#   all k3s_nodes but still only acts on the first server.
+#   Pod tasks execute only on the first server node; limit the run to that
+#   node (-l <first-server>) instead of the whole k3s_nodes group.
 #
 # k3s_pod_limit
 #   Comma-separated list (or YAML list) of pod names to manage.
@@ -32,13 +42,13 @@
           - "k3s/playbooks/pods.yml — deploy or update k3s pods"
           - ""
           - "Options:"
-          - "  -l <node>              target a specific k3s node (pod tasks only run on first server)"
-          - "  -e k3s_pod_limit=X     comma-separated pod names to manage (default: all pods)"
+          - "  -l <first-server>     keep the run to the first server node"
+          - "  -e k3s_pod_limit=X    comma-separated pod names to manage (default: all pods)"
           - ""
           - "Examples:"
-          - "  ansible-playbook pods.yml -l k3sm3"
-          - "  ansible-playbook pods.yml -l k3sm3 -e k3s_pod_limit=tinydns"
-          - "  ansible-playbook pods.yml -e k3s_pod_limit=tinydns,authelia"
+          - "  ansible-playbook pods.yml -l k3sm1"
+          - "  ansible-playbook pods.yml -l k3sm1 -e k3s_pod_limit=tinydns"
+          - "  ansible-playbook pods.yml -l k3sm1 -e k3s_pod_limit=tinydns,authelia"
 
 - hosts: all,!k3s_pods,!k3s_pod_containers
   become: true
@@ -56,9 +66,6 @@
     - include_role:
         name: data-utilities
         tasks_from: setup_passdb
-    - include_role:
-        name: data-utilities
-        tasks_from: default_variables
 
 - hosts: k3s_nodes
   become: true
@@ -70,8 +77,25 @@
         tasks_from: setup_facts
     - include_role:
         name: k3s
+        tasks_from: workload_prerequisites
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false)
+    - include_role:
+        name: k3s
+        tasks_from: traefik_label_manifest
+    - include_role:
+        name: k3s
         tasks_from: manage_pods
       when: >
         _k3s_cfg is defined and
         _first_server | default(false) and
         network_pods is defined
+    - include_role:
+        name: k3s
+        tasks_from: deploy_network_policies
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.network_policies is defined and
+        _k3s_cfg.network_policies.state | default('present') == 'present'

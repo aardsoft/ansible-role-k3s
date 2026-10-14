@@ -11,8 +11,16 @@
     loop_var: _deployment
 
 - name: manage k3s pods
+  # The full k3s run is rare and accuracy-first (cluster changes, node joins);
+  # day-to-day pod churn belongs in playbooks/pods.yml, which applies the
+  # prerequisites a pod needs (MetalLB pools, Longhorn StorageClasses, server
+  # manifests) via tasks/workload_prerequisites.yml — without the component
+  # charts that deploy_infrastructure.yml manages.  A cluster config opts
+  # into pod deploys from the full run with deploy_pods: true.
   include_tasks: manage_pods.yml
-  when: network_pods is defined
+  when:
+    - network_pods is defined
+    - (_k3s_cfg.deploy_pods | default(false)) | bool
 
 # Network policies are applied last so pod label updates from manage_pods and
 # extra deployments above are already in place when policies take effect.

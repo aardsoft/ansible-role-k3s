@@ -26,9 +26,19 @@
 # every cluster will end up with that for DNS publishing, so we add some config
 # around that to make it cluster agnostic. We probably would need to check
 # that against a cluster with no tinydns at all as well.
+#
+# Test selection: targets under <svc>.<ns>.svc.cluster.local are probed only
+# when the target Service exists and has ready endpoints — entries with no
+# ready target skip instead of burning a 60s timeout, which keeps runs that
+# manage no pods (deploy_pods false in the full run, fresh bootstrap) from
+# failing on entries whose workloads are simply not present.  A run managing
+# pods may never pass over skips: they must fail the run instead (assert).
+# Entries whose host does not resolve to a cluster service are always
+# probed.  Skipped entries are recorded as 'skipped' in the results.
 
 # ---------------------------------------------------------------------------
-# tinydns sidecarURL probes (cert-manager issuers)
+# tinydns sidecarURL probes (cert-manager issuers) — always runnable; their
+# only guard is the cert-manager namespace existing
 # ---------------------------------------------------------------------------
 - name: collect configured sidecarURL targets from cert-manager issuers
   set_fact:
@@ -104,6 +114,97 @@
 # ---------------------------------------------------------------------------
 # cluster-defined reachability checks (network_policies.reachability_tests)
 # ---------------------------------------------------------------------------
+
+# Target readiness gates which probes run: cluster-internal hosts resolve to
+# a Service + Endpoints, and an entry skips when there is nothing ready to
+# probe (no point letting a probe block 60s against an absent workload).
+# The skipped iterations of the query loop still occupy their .results slot
+# ('skipped': true, no 'resources'), so entries stay index-aligned with the
+# registered results per original list position.
+- name: query target endpoints for configured reachability tests
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: v1
+    kind: Endpoints
+    name: "{{_wr_svc_parts[0]}}"
+    namespace: "{{_wr_svc_parts[1] | default('default')}}"
+  vars:
+    # <svc>.<ns>.svc.cluster.local -> ['<svc>', '<ns>']
+    _wr_svc_parts: "{{(_wr_entry.host | regex_replace('[.]svc[.]cluster[.]local$', '')) | split('.')}}"
+  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop_control:
+    loop_var: _wr_entry
+    label: "{{_wr_entry.name}}"
+  register: _wr_target_endpoints
+  when: _wr_entry.host is string and _wr_entry.host.endswith('.svc.cluster.local')
+
+- name: split reachability tests into executable and skipped
+  # Pairing is explicit via zip: the skipped iterations of the query loop
+  # above still occupy their .results slot, so each test pairs with its own
+  # Endpoints result — no position counter to keep in sync.
+  set_fact:
+    _wr_custom_split: >-
+      {%- set _out = {'run': [], 'skip': []} -%}
+      {%- for _pair in (_k3s_cfg.network_policies.reachability_tests | default([])
+                        | zip(_wr_target_endpoints.results | default([]))) -%}
+        {%- set _t = _pair.0 -%}
+        {%- set _res = _pair.1 | default(none) -%}
+        {%- set _sel = namespace(ready=false) -%}
+        {%- if _t.host is string and _t.host.endswith('.svc.cluster.local') -%}
+          {%- if _res is not none and _res.resources is defined and _res.resources | length > 0 -%}
+            {%- for _sub in (_res.resources[0].subsets | default([])) -%}
+              {%- if (_sub.addresses | default([])) | length > 0 -%}
+                {%- set _sel.ready = true -%}
+              {%- endif -%}
+            {%- endfor -%}
+          {%- endif -%}
+          {%- if _sel.ready -%}
+            {%- set _ = _out['run'].append(_t) -%}
+          {%- else -%}
+            {%- set _ = _out['skip'].append(_t.name) -%}
+          {%- endif -%}
+        {%- else -%}
+          {%- set _ = _out['run'].append(_t) -%}
+        {%- endif -%}
+      {%- endfor -%}
+      {{ _out }}
+
+- name: set executable and skipped test lists
+  set_fact:
+    _wr_custom_run: "{{_wr_custom_split.run | default([])}}"
+    _wr_custom_skip: "{{_wr_custom_split.skip | default([])}}"
+
+- name: note pod-dependent reachability tests skipped
+  debug:
+    msg: "reachability test(s) skipped (target has no ready endpoints): {{_wr_custom_skip | join(', ')}}"
+  when: _wr_custom_skip | default([]) | length > 0
+
+- name: fail when skipped tests occur in a run managing pods
+  # Skips are only sound for runs that genuinely don't manage pods
+  # (deploy_pods false / nothing in network_pods).  When the run manages
+  # pods, a reachable target with no ready endpoints is a crashed, absent or
+  # unpoliced workload — a failure, not a skip.
+  ansible.builtin.assert:
+    that:
+      - network_pods is not defined or not ((_k3s_cfg.deploy_pods | default(false)) | bool)
+    fail_msg: >-
+      reachability test(s) skipped while this run also manages pods — a
+      target without ready endpoints is a failure here: {{_wr_custom_skip | join(', ')}}
+  when: _wr_custom_skip | default([]) | length > 0
+
+- name: record skipped reachability test results
+  set_fact:
+    _wr_test_results: "{{_wr_test_results | default([]) + [{
+      'name': _custom_test.name,
+      'expect': _custom_test.expect | default('reachable'),
+      'pass': true,
+      'rc': 'skipped'}]}}"
+  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop_control:
+    loop_var: _custom_test
+    label: "{{_custom_test.name}}"
+  when: _custom_test.name in _wr_custom_skip
+
 - name: probe configured reachability targets
   ansible.builtin.command:
     argv:
@@ -124,7 +225,7 @@
       - sh
       - "-c"
       - "n=0; until nc -z -w 5 {{_custom_test.host}} {{_custom_test.port}}; do n=$((n+1)); [ $n -ge 12 ] && exit 1; sleep 5; done"
-  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop: "{{_wr_custom_run}}"
   loop_control:
     loop_var: _custom_test
     index_var: _wr_custom_idx
@@ -132,7 +233,7 @@
   register: _wr_custom_results
   ignore_errors: true
   changed_when: false
-  when: _k3s_cfg.network_policies.reachability_tests | default([]) | length > 0
+  when: _wr_custom_run | default([]) | length > 0
   vars:
     # always set, so the argv shape is invariant; an entry without labels
     # gets a benign marker label (unlabeled = plain namespace-baseline egress)
@@ -155,12 +256,12 @@
               if (_custom_test.expect | default('reachable')) == 'reachable'
               else (_wr_custom_results.results[_wr_custom_idx].rc | default(-1)) != 0,
       'rc': _wr_custom_results.results[_wr_custom_idx].rc | default('skipped')}]}}"
-  loop: "{{_k3s_cfg.network_policies.reachability_tests | default([])}}"
+  loop: "{{_wr_custom_run}}"
   loop_control:
     loop_var: _custom_test
     index_var: _wr_custom_idx
     label: "{{_custom_test.name}}"
-  when: _k3s_cfg.network_policies.reachability_tests | default([]) | length > 0
+  when: _wr_custom_run | default([]) | length > 0
 
 - name: assert all workload reachability tests passed
   assert:

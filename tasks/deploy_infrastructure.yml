@@ -39,11 +39,12 @@
     _k3s_cfg.longhorn.state is defined and
     _k3s_cfg.longhorn.state == 'absent'
 
-- include_tasks: deploy_metallb.yml
-  when: >
-    _k3s_cfg.metallb is defined and
-    _k3s_cfg.metallb.state is defined and
-    _k3s_cfg.metallb.state == 'present'
+# LB pools, Longhorn StorageClasses and traefik/server manifests are applied
+# via workload_prerequisites.yml — the shared copy also included by the
+# focused pod/deployment playbooks, so guard shapes cannot drift between the
+# paths.  Guard-less here: the include is internally state-guarded per
+# component.
+- include_tasks: workload_prerequisites.yml
 
 - include_tasks: remove_metallb.yml
   when: >
@@ -89,10 +90,9 @@
     _k3s_cfg.cert_manager.state is defined and
     _k3s_cfg.cert_manager.state == 'present'
 
-- name: manage k3s server manifests
-  include_tasks: manage_server_manifests.yml
-  when: _k3s_cfg.server_manifests is defined
-
+# the server_manifests dict pass runs via workload_prerequisites.yml above —
+# kept early with the other manifest work; nothing downstream depends on it
+# being last.
 - name: manage node labels
   include_tasks: manage_node_labels.yml
 

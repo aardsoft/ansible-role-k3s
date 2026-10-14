@@ -1,0 +1,74 @@
+# Traefik HelmChartConfig label manifest. Each server node's local addon
+# controller re-applies its local manifests on restart (and on directory
+# rescans in newer addon controllers), so the manifest file must exist on
+# every server node — a stale file on any of them reverts the CR to the
+# old label set and newly configured access areas flakily lose traffic.
+#
+# Runs on the first server: the local copy is written via
+# manage_server_manifest.yml (its kubectl apply stays first-server-gated),
+# then the same rendering is fanned out to the remaining server nodes via
+# delegate_to.  Focused runs that limit to the first server therefore keep
+# the whole cluster's copies current; a run that excludes the first server
+# cannot fan out (nothing in its play can apply the kubectl apply either).
+# Redundant calls from a multi-server play are harmless no-ops.
+
+- name: manage Traefik configuration manifest
+  include_tasks: manage_server_manifest.yml
+  vars:
+    _manifest:
+      key: traefik-ansible-label.yaml
+      value:
+        template: traefik-ansible-label.j2
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.traefik is defined and
+    k3s_role | default('agent') == 'server'
+
+# The fan-out target list is derived from per-host inventory vars only, so
+# it does not depend on the run's limits or on any group-naming convention.
+# Expected cluster config shape:
+#   - k3s_cluster: set group-level (e.g. group_vars/k3s_fi1.yml: "fi1") on
+#     every host of exactly one cluster
+#   - k3s_role: per-host server/agent (site.d/hosts)
+#   - k3s_clusters[k3s_cluster]: the cluster config, referenced by
+#     setup_facts.yml into _k3s_cfg (must define traefik: and first_server:)
+#   - _first_server and _k3s_kubecfg: set by tasks/setup_facts.yml
+- name: determine the cluster's remaining server nodes
+  ansible.builtin.set_fact:
+    _traefik_fanout_nodes: >-
+      {{ hostvars | dict2items
+         | selectattr('value.k3s_cluster', 'defined')
+         | selectattr('value.k3s_cluster', 'equalto', k3s_cluster)
+         | map(attribute='key')
+         | map('extract', hostvars)
+         | selectattr('k3s_role', 'defined')
+         | selectattr('k3s_role', 'equalto', 'server')
+         | map(attribute='inventory_hostname')
+         | reject('equalto', inventory_hostname)
+         | list }}
+  changed_when: false
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.traefik is defined and
+    _first_server | default(false) and
+    k3s_role | default('agent') == 'server'
+
+# The write-only copy of the same template manage_server_manifest.yml
+# pushes; the apply stays a first-server-only step, so the fan-out needs no
+# register.
+- name: push the Traefik manifest to the remaining server nodes
+  ansible.builtin.template:
+    src: server-manifests/traefik-ansible-label.j2
+    dest: /var/lib/rancher/k3s/server/manifests/traefik-ansible-label.yaml
+    mode: '0644'
+    owner: root
+  delegate_to: "{{_traefik_node}}"
+  loop: "{{_traefik_fanout_nodes | default([])}}"
+  loop_control:
+    loop_var: _traefik_node
+    label: "{{_traefik_node}}"
+  when: >
+    _k3s_cfg is defined and
+    _k3s_cfg.traefik is defined and
+    _first_server | default(false) and
+    k3s_role | default('agent') == 'server'

@@ -53,9 +53,6 @@
     - include_role:
         name: data-utilities
         tasks_from: setup_passdb
-    - include_role:
-        name: data-utilities
-        tasks_from: default_variables
 
 - hosts: k3s_nodes
   become: true
@@ -65,6 +62,9 @@
     - include_role:
         name: k3s
         tasks_from: setup_facts
+    - include_role:
+        name: k3s
+        tasks_from: traefik_label_manifest
     - include_role:
         name: k3s
         tasks_from: deploy_network_policies

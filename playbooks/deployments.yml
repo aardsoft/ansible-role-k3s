@@ -1,18 +1,20 @@
-# Run k3s extra deployments (management-ui, kyverno, headlamp, etc.) without
+# Run k3s extra deployments (kyverno, headlamp, arc runners, etc.) without
 # running a full cluster setup.
 #
-# This playbook only runs the deployments loop from deploy_on_first.yml —
-# it skips cluster bootstrap, infrastructure components, pods, and network
-# policies.
+# This playbook first applies the minimal infrastructure a deployment needs
+# (workload_prerequisites.yml: MetalLB pools, Longhorn StorageClasses,
+# Traefik server manifests) plus the cert-manager issuer/certificate config
+# (new deployments may need a new issuer or cert from them), then the
+# kyverno webhook readiness check, then the deployments loop.  It skips
+# cluster bootstrap, component charts (longhorn, cert-manager), pods and
+# network policies.
 #
 # Usage:
-#   ansible-playbook deployments.yml
-#   ansible-playbook deployments.yml -l <node>
+#   ansible-playbook deployments.yml -l <first-server>
 #
 # -l / --limit
-#   Restrict to a specific k3s cluster node.  Deployment tasks only execute
-#   on the first server node, so without -l the play runs against all
-#   k3s_nodes but still only acts on the first server.
+#   Deployment tasks execute only on the first server node; limit the run
+#   to that node instead of the whole k3s_nodes group.
 #
 # To limit to a specific deployment, set k3s_deployment_limit to a
 # deployment name matching a key under k3s.deployments in group_vars.
@@ -29,12 +31,11 @@
           - "k3s/playbooks/deployments.yml — run k3s extra deployments"
           - ""
           - "Options:"
-          - "  -l <node>    target a specific k3s node (deployment tasks only run on first server)"
+          - "  -l <first-server>    keep the run to the first server node"
           - ""
           - "Examples:"
-          - "  ansible-playbook deployments.yml -l k3sm3"
-          - "  ansible-playbook deployments.yml -l k3sm3 -e k3s_deployment_limit=rabbitmq"
-          - "  ansible-playbook deployments.yml -l k3sm3 -e 'k3s_deployment_limit=rabbitmq,management-ui'"
+          - "  ansible-playbook deployments.yml -l k3sm1 -e k3s_deployment_limit=rabbitmq"
+          - "  ansible-playbook deployments.yml -l k3sm1 -e 'k3s_deployment_limit=rabbitmq,management-ui'"
 
 - hosts: all,!k3s_pods,!k3s_pod_containers
   become: true
@@ -52,9 +53,6 @@
     - include_role:
         name: data-utilities
         tasks_from: setup_passdb
-    - include_role:
-        name: data-utilities
-        tasks_from: default_variables
 
 - hosts: k3s_nodes
   become: true
@@ -66,7 +64,27 @@
         tasks_from: setup_facts
     - include_role:
         name: k3s
+        tasks_from: workload_prerequisites
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false)
+    - include_role:
+        name: k3s
+        tasks_from: traefik_label_manifest
+    - include_role:
+        name: k3s
+        tasks_from: configure_cert_manager
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false) and
+        _k3s_cfg.cert_manager is defined and
+        _k3s_cfg.cert_manager.state | default('present') == 'present'
+    - include_role:
+        name: k3s
         tasks_from: fix_kyverno_webhook
+      when: >
+        _k3s_cfg is defined and
+        _first_server | default(false)
     - name: run extra deployments
       include_role:
         name: k3s

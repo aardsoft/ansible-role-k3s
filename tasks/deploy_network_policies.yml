@@ -205,12 +205,15 @@
 # permissive subsets of the new allow rules (union stays permissive, nothing
 # breaks while both exist), but the union masks the new posture: notably old
 # allow-node-network-ingress admits the whole cluster CIDR, so tightening
-# the cluster-CIDR ingress never takes effect until these are gone.  This
-# query is cluster-wide, deliberately including the system namespaces whose
-# policies deploy in deploy_infrastructure.yml — placing the removal AFTER
-# the new set is applied means traffic only ever converges, and the test
-# suite (end of this run) is the first observer of the now-effective
-# posture.
+# the cluster-CIDR ingress never takes effect until these are gone.  The
+# full run and the network-policies playbook run the test suite behind this
+# include and observe the new posture; the pods and apply-network-policies
+# playbooks run the migration unsupervised by choice — the drops are one-
+# time and the union stays permissive, so the accepted risk is a validated-
+# later posture rather than a broken cluster.  This query is cluster-wide,
+# deliberately including the system namespaces whose policies deploy in
+# deploy_infrastructure.yml — placing the removal AFTER the new set is
+# applied means traffic only ever converges.
 - name: query legacy managed policies (old layout)
   kubernetes.core.k8s_info:
     kubeconfig: "{{_k3s_kubecfg}}"

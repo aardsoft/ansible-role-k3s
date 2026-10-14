@@ -1,0 +1,138 @@
+# Longhorn StorageClass management.  Included by the infrastructure phase's
+# workload_prerequisites pass (shared with the focused pod/deployment
+# playbooks) instead of deploy_longhorn.yml, whose chart deploy and
+# default-class handling run around it.
+
+# Tier configuration: tiers come from two sources, combined — explicit
+# declarations in _k3s_cfg.longhorn.tiers ({}-valued tiers are valid) and the
+# tiers referenced by any cluster node's longhorn_volumes entries.  Each
+# derived StorageClass longhorn-<tier> selects the tier's disks via the
+# diskSelector parameter; numberOfReplicas is only set when the tier config
+# pins it (the chart global default of 3 replicas stays authoritative — a
+# lower value would be a downgrade from the cluster default).
+- name: validate longhorn_volumes tier declarations
+  # map(attribute='tier') below dies with a raw Jinja error on a tier-less
+  # entry, before the readable per-disk assert in provision_longhorn_disk.yml
+  # ever runs (the infrastructure deploy precedes per-node provisioning).
+  ansible.builtin.assert:
+    that: _lh_untiered | length == 0
+    fail_msg: >-
+      longhorn_volumes entries without a tier in the
+      {{ k3s_clusters[k3s_cluster] | default(k3s_cluster) }} group:
+      {{ _lh_untiered | map(attribute='name') | join(', ') }}
+      — tier is required (it names the disk tag, the derived longhorn-<tier>
+      StorageClass and the mountpoint).
+  vars:
+    _lh_untiered: >-
+      {{ (groups[k3s_clusters[k3s_cluster]] | default([]))
+         | map('extract', hostvars, 'longhorn_volumes')
+         | select('defined')
+         | sum(start=[])
+         | rejectattr('tier', 'defined')
+         | list }}
+
+- name: index tiers used by cluster nodes
+  ansible.builtin.set_fact:
+    _longhorn_used_tiers: >-
+      {{ ((groups[k3s_clusters[k3s_cluster]] | default([])
+           | map('extract', hostvars, 'longhorn_volumes')
+           | select('defined')
+           | sum(start=[])
+           | map(attribute='tier')
+           | list)
+          + (_k3s_cfg.longhorn.tiers | default({}) | dict2items | map(attribute='key') | list))
+         | unique }}
+
+- name: build tier StorageClass parameters
+  # {%-/-%} trim markers: a folded set_fact template must render to exactly
+  # one expression for Ansible to return a dict — stray whitespace between
+  # the block tags would leave the fact as a string and break combine().
+  ansible.builtin.set_fact:
+    _longhorn_tier_classes: >-
+      {%- set _tiers = _k3s_cfg.longhorn.tiers | default({}) -%}
+      {%- set _t = {} -%}
+      {%- for _tn in _longhorn_used_tiers -%}
+      {%- set _tp = (_tiers[_tn].parameters | default({})) if _tn in _tiers else {} -%}
+      {%- set _ = _t.update({'longhorn-' ~ _tn: {'parameters': {'diskSelector': [_tn]} | combine(_tp)}}) -%}
+      {%- endfor -%}
+      {{ _t }}
+
+# Per-workload StorageClasses (see templates/longhorn-storageclass.yml.j2;
+# config in _k3s_cfg.longhorn.storage_classes).  The chart's default
+# "longhorn" class is not touched here.
+- name: query existing StorageClasses managed by us
+  kubernetes.core.k8s_info:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    api_version: storage.k8s.io/v1
+    kind: StorageClass
+    label_selectors:
+      - "configurator=ansible"
+  register: _current_longhorn_storage_classes
+
+- name: index existing StorageClasses by name
+  set_fact:
+    _longhorn_sc_index: >-
+      {{ dict(_current_longhorn_storage_classes.resources
+              | map(attribute='metadata.name')
+              | zip(_current_longhorn_storage_classes.resources)) }}
+
+- name: deploy per-workload StorageClasses
+  kubernetes.core.k8s:
+    kubeconfig: "{{_k3s_kubecfg}}"
+    state: present
+    apply: yes
+    definition: "{{_desired}}"
+  loop: "{{_desired_longhorn_storage_classes}}"
+  loop_control:
+    loop_var: _desired
+    label: "{{_desired.metadata.name}}"
+  when: (_k3s_cfg.longhorn.storage_classes | default({}) | length > 0 or
+        _longhorn_used_tiers | length > 0) and
+        _desired | k3s_content_changed(_longhorn_sc_index[_desired.metadata.name] | default(none))
+  vars:
+    _desired_longhorn_storage_classes: "{{ lookup('template', 'longhorn-storageclass.yml.j2') | from_yaml_all | select('mapping') | list }}"
+    # combine order: explicit storage_classes WIN over the derived tier
+    # classes (a hand-tuned class overrides the same-named derived one)
+    _np_longhorn_storage_classes: >-
+      {{ (_longhorn_tier_classes
+          | combine(_k3s_cfg.longhorn.storage_classes | default({}))) }}
+
+# STORAGE_CLASSES are global objects; a name change in the config would leave
+# the old class behind (no automatic cleanup — classes in use are bound PVCs'
+# immutable references, so deleting a still-referenced class would break the
+# cluster; remove manually once any claims using it are gone).
+# Advisory check: a tier whose class carries the global replica default
+# (currently 3) needs at least that many nodes claiming the tier's disks.
+# Replicas have nothing to schedule onto otherwise and the PVCs stay
+# Pending.  Tier-classes with an explicit numberOfReplicas are assumed to
+# reflect an intentional placement decision.
+- name: warn about tiers with too few nodes for configured replicas
+  ansible.builtin.debug:
+    msg: >-
+      Longhorn tier {{ _lh_tier }}: {{ _lh_tier_nodes | length }} node(s) claim it
+      [{{ _lh_tier_nodes | join(', ') }}] but volumes in its class
+      (longhorn-{{ _lh_tier }}) default to {{ _lh_tier_replicas }} replicas.
+      Replicas that have no tagged disk to land on leave PVCs Pending.  Either
+      provision matching disks via longhorn_volumes on more nodes, or pin an
+      explicit numberOfReplicas in _k3s_cfg.longhorn.tiers.{{ _lh_tier }}.parameters.
+  vars:
+    _lh_tier_nodes: >-
+      {%- set _n = [] -%}
+      {%- for _h in groups[k3s_clusters[k3s_cluster]] | default([]) -%}
+      {%- if hostvars[_h].longhorn_volumes is defined and
+            hostvars[_h].longhorn_volumes | map(attribute='tier')
+            | select('equalto', _lh_tier) | list | length > 0 -%}
+      {%- set _ = _n.append(_h) -%}
+      {%- endif -%}
+      {%- endfor -%}
+      {{ _n }}
+    _lh_tier_replicas: >-
+      {{ _longhorn_tier_classes['longhorn-' ~ _lh_tier].parameters.numberOfReplicas
+         | default('3') | int }}
+  when: >-
+    _lh_tier_nodes | length < (_lh_tier_replicas | int)
+  loop: "{{_longhorn_used_tiers}}"
+  loop_control:
+    loop_var: _lh_tier
+    label: "{{_lh_tier}}"
+

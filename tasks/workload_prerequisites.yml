@@ -1,0 +1,38 @@
+# Minimal infrastructure the workload machinery (pods and extra deployments)
+# consumes, applied by the focused playbooks so a run without a full k3s.yml
+# still bootstraps what its workloads need.  The full run applies the same
+# steps via deploy_infrastructure.yml including this file — it is the shared
+# copy, so order and guard shapes cannot drift between the two paths.
+#
+# Deliberately NOT included from here: the component charts themselves are
+# part of the infrastructure phase; these playbooks assume the cluster was
+# bootstrapped once and only reconcile the configuration objects a workload
+# references (LB pools, StorageClasses, Traefik manifests).
+#
+# Guard split: LB and storage reconciliation act cluster-wide and run on the
+# first server only.  The traefik label manifest is a per-server-node file
+# and deliberately lives outside this file (tasks/traefik_label_manifest.yml)
+# so callers that run the prerequisites on the first server only can still
+# include it across all server nodes.
+
+# load balancer: LoadBalancer-type services bind IPs from the managed pools
+- include_tasks: deploy_metallb.yml
+  when: >
+    _first_server | default(false) and
+    _k3s_cfg.metallb is defined and
+    _k3s_cfg.metallb.state is defined and
+    _k3s_cfg.metallb.state == 'present'
+
+# storage: PVCs reference the per-workload/tier StorageClasses
+- include_tasks: longhorn_storage_classes.yml
+  when: >
+    _first_server | default(false) and
+    _k3s_cfg.longhorn is defined and
+    _k3s_cfg.longhorn.state is defined and
+    _k3s_cfg.longhorn.state == 'present'
+
+# config-managed manifests (server_manifests dict)
+- include_tasks: manage_server_manifests.yml
+  when: >
+    _first_server | default(false) and
+    _k3s_cfg.server_manifests is defined

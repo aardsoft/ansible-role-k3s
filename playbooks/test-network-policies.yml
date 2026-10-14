@@ -54,9 +54,6 @@
     - include_role:
         name: data-utilities
         tasks_from: setup_passdb
-    - include_role:
-        name: data-utilities
-        tasks_from: default_variables
 
 - hosts: k3s_nodes
   become: true

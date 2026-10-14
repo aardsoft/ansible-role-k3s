@@ -1,5 +1,19 @@
+# Full k3s cluster deployment: bootstrap, infrastructure, applications
+# (deployments, pods, network policies) and workload reachability checks.
+# Accuracy-first and rare by design — a run touches the whole cluster, so
+# the k3s_nodes play walks the nodes one at a time (serial: 1).  For
+# day-to-day pod churn use playbooks/pods.yml, and for extra deployments
+# playbooks/deployments.yml instead.
+#
+# Pod deployment at the end of the applications phase is opt-in: set
+# deploy_pods: true in the cluster config.  Without it the full run leaves
+# pod state untouched — playbooks/pods.yml owns pod work and applies the
+# infrastructure prerequisites (MetalLB pools, Longhorn StorageClasses,
+# server manifests) itself.
+#
 # k3s-pod and k3s_pod_containers hosts use sshkubectl and may not exist yet
 # at playbook runtime - exclude them from the setup play.
+
 - hosts: all,!k3s_pods,!k3s_pod_containers
   become: True
   vars:
@@ -16,12 +30,10 @@
     - include_role:
         name: data-utilities
         tasks_from: setup_passdb
-    - include_role:
-        name: data-utilities
-        tasks_from: default_variables
 
 - hosts: k3s_nodes
   become: True
+  serial: 1
   vars:
     ansible_user: management
   roles:

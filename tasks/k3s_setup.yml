@@ -428,8 +428,13 @@
     _first_server == true
 
 - name: delegate k3s tokens
+  # ansible_play_hosts_all, not ansible_play_hosts: under serial batching the
+  # latter holds only the current batch, so on a fresh bootstrap the first
+  # server would delegate the join token to at most one node (or none at all
+  # when it is not the first batch member), and the remaining nodes then skip
+  # their join with an empty token, silently.
   include_tasks: delegate_token.yml
-  with_items: "{{ansible_play_hosts}}"
+  with_items: "{{ansible_play_hosts_all}}"
   loop_control:
     loop_var: _delegate
   when: >

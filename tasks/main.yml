@@ -13,17 +13,11 @@
     _k3s_cfg is defined and
     'bootstrap' in _k3s_phases
 
-# Write Traefik HelmChartConfig on all server nodes as soon as the traefik key
-# is defined so entrypoints and TLS are in place before other deployments run.
-# File is written to every server node; kubectl apply is gated to first server
-# only (in manage_server_manifest.yml).
+# Traefik HelmChartConfig labels: the manifest file is written to every
+# server node and fanned out from the first server (tasks/traefik_label_manifest.yml)
+# so each node's local addon controller keeps a current copy.
 - name: manage Traefik configuration manifest
-  include_tasks: manage_server_manifest.yml
-  vars:
-    _manifest:
-      key: traefik-ansible-label.yaml
-      value:
-        template: traefik-ansible-label.j2
+  include_tasks: traefik_label_manifest.yml
   when: >
     _k3s_cfg is defined and
     _k3s_cfg.traefik is defined and
